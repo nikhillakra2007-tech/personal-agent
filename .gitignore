@@ -1,0 +1,9 @@
+# Lakra 2.0 — local runtime, never committed
+.venv/
+var/
+__pycache__/
+*.pyc
+.env
+.pytest_cache/
+*.db
+*.jsonl

@@ -1,0 +1,9 @@
+Lakra V1 — 0.1.0
+demo PASS date: 2026-09-29
+test baseline: 442 passed (zero failures, verified in four batches)
+demo: scripts/demo_v1.py — 30 checks across 5 acts, PASS
+runbook: docs/demo-v1.md (AC#1/AC#2/AC#4/AC#5 demonstrated;
+  AC#3 physical half deferred as approved 2026-09-28)
+verified revision: n/a — no VCS present in this tree; verified by
+  clean-state demo run (isolated workdir, frozen fixtures) plus the
+  full baseline above.

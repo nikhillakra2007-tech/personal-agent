@@ -1,0 +1,56 @@
+# Requirements Checklist — 001-lakra-v1
+
+- [ ] Task contract schema covers goal/status/priority/permissions/scopes/budget/history/verification (spec FR-1)
+- [ ] Pipeline stages named with VERIFY fan-out + registry-backed router (spec FR-2)
+- [ ] Browser loop specifies structured-first, visual-fallback, verify-every-action (spec FR-3)
+- [ ] Computer-control lock: exclusive, indicated, released, preemptible (spec FR-4)
+- [ ] Policy L0–L4 with ALLOW/ASK/BLOCK between plan and execution (spec FR-5)
+- [ ] Scheduler: concurrency, locks, priorities, pause/resume/cancel (spec FR-6)
+- [ ] Resource monitor dimensions listed; thresholds deferred to measurement (spec FR-7)
+- [ ] ModelProvider abstraction with routing ladder (spec FR-8)
+- [ ] MCP scoping + secret-ref discipline (spec FR-9)
+- [ ] Audit event taxonomy complete (spec FR-10)
+- [ ] V1 acceptance criteria testable without implementation
+- [ ] Open questions recorded, none blocking slice-01
+- [ ] slice-01 scope excludes browser/models/UI
+- [x] Router choke point: resolve → policy → budget/admission → execute → record (slice-03 built)
+- [x] Executors sandboxed: fs root containment, no shell=True, conservative allowlist (slice-03 built)
+- [x] Unknown tools rejected; future capability names stay opaque until their slice (slice-03 built)
+- [x] LocalProvider behind ModelProvider (loopback-only, typed errors, no live model yet) (slice-06 built)
+- [x] Proposal adapter: strict schema, hostile output rejected, policy still gates (slice-06 built)
+- [x] Real telemetry (psutil + nvidia-smi) feeds admission; unknown GPU degrades honestly (slice-06 built)
+- [x] Token ledger refuses pre-HTTP on exhaustion; withhold-don't-kill pressure semantics (slice-06 built)
+- [x] Scoped MCP: default-deny specs, loopback-only, env allowlist, fail-closed quarantine (slice-07 built)
+- [x] Approval UX: pending listing, TTL fail-closed sweep, CLI y/n, no approve-all (slice-07 built)
+- [x] One-shot tokens: canonical 4-tuple binding, single burn on success, reuse/mismatch/expiry rejected (slice-07 built)
+- [x] SQLite persistence: tasks/approvals/tokens/usage, WAL, versioned, fail-closed (slice-08 built)
+- [x] Boot recovery: owners released, heap rebuilt, sweep, uncertain-state burn (slice-08 built)
+- [x] Cross-process approvals: CAS decide, shared pending, real CLI (slice-08 built)
+- [x] Deterministic planner: template dispatch, unknown-goal refusal, L3-terminating plans, no model calls (slice-09 built)
+- [x] Runner loop: per-step budget/admission, CONTINUE/STOPPED/ASK_PENDING, single bounded replan (slice-09 built)
+- [x] Model proposals measured separately (parsed/verdict/tokens), fallback on any failure, no scoring/selection (slice-10 built)
+- [x] Deterministic planner fixed baseline incl. rationale determinism; no model calls in v0 path (slice-10 verified)
+- [x] Hints schema closed/capped/secret-rejecting; replan builds new persisted plans, old frozen (slice-11 built)
+- [x] Resume requires fresh observation; step outcomes write-once; schema v1->v2 migrates (slice-11 built)
+- [x] Model-aware replan with attempt lineage; failure corpus hash-only, capped, pruned; no learning APIs (slice-12 built)
+- [x] Supervised loop: abstract decider, approve/deny/timeout paths, plan-DONE closes to task triage (slice-13 built)
+- [x] Retention pruning with tombstones; thin single-action CLI with exit codes (slice-13 built)
+- [x] Deterministic goal->hints analyzer (URL/content extraction, refusal, secret-shaped rejection) (slice-15 built)
+- [x] Diff verification with baselines; missing baseline audits NO_BASELINE, never silent (slice-16 built)
+- [x] Model hint suggestions measured separately; conflicts overruled by deterministic baseline (slice-19 built)
+- [x] Attempt ledger: uuid per execution, narrow (task,kind,target,effect) suppression, lineage, boot abandon; no exactly-once claims (slice-17 built)
+- [x] Retention sweep: dead attempts/approvals/tokens/orphan usage reaped; live/pending/open spared; dry-run pure (slice-18 built)
+- [x] Lifecycle ownership: DONE->COMPLETED, error->FAILED, blocked/budget stall resumable, cancel freezes plans (slice-14 built)
+
+## V1 closeout sign-off — 2026-09-29 (marks only; lines above untouched)
+
+- [x] FR-1..FR-10 planning boxes (lines 3–12): satisfied by slices 01–08 as built; see per-slice lines 16–28
+- [x] V1 acceptance testable, no slice-01 blockers, slice-01 excludes browser/models/UI (lines 13–15): as specified
+- [x] Slices 15–21: analyzer, diff verification, attempt ledger, retention, model-assist measurement, guards, acceptance harness — built, 299/299 green (tasks.md)
+- [x] Slices 22–28: live submit, multi-field fill, locator fallback, check/select, follow-link flows, table inventory — built, 344/344 green (tasks.md)
+- [x] Slices 29A–31: cursor-unrolled loops, grounded links, grounded controls — built, 370/370 green (tasks.md)
+- [x] Slices 32–35: composed loop/follow/form runners + road dispatcher — built, 394/394 green (tasks.md)
+- [x] Slices 36–37: browser CLI + cross-process adoption (exactly-once) — built, 412/412 green (tasks.md)
+- [x] Slices 38–40: stranded-task resume, read-only visibility, JSON visibility — built, 442/442 green (tasks.md)
+- [x] AC#1/AC#2/AC#4/AC#5 demonstrated end to end by scripts/demo_v1.py (30 checks PASS); AC#3 physical half deferred as approved 2026-09-28 (tasks.md C-A/C-B), documented in docs/demo-v1.md
+- [x] Exception: none. Zero open boxes, zero silent skips.

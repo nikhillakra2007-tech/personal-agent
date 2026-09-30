@@ -1,0 +1,79 @@
+<!DOCTYPE html>
+<html lang="en">
+<head><meta charset="utf-8"><title>My Courses — Demo Portal</title></head>
+<body>
+<h1>My Courses</h1>
+<nav><a href="#">Dashboard</a> | <a href="#">Courses</a></nav>
+<ul>
+  <li class="course-card">Linear Algebra — <strong>pending</strong> <a href="course-detail.html">details</a></li>
+  <li class="course-card">Thermodynamics — <strong>pending</strong></li>
+  <li class="course-card">History of Art — completed</li>
+</ul>
+<form action="#" onsubmit="return false">
+  <label>Username <input type="text" id="username" aria-label="Username"></label>
+  <label>Password <input type="password" id="pwd" aria-label="Password" value="s3cr3t-nope"></label>
+</form>
+<h2>Interaction lab (slice-05)</h2>
+<button id="toggle" onclick="document.getElementById('status').textContent='clicked'">Toggle status</button>
+<p id="status">not clicked</p>
+<label>Echo <input type="text" id="echo" aria-label="Echo"></label>
+<p>Echo output: <span id="echo-out"></span></p>
+<h2>Address form (slice-23)</h2>
+<form action="#" onsubmit="return false">
+  <label>Full name <input type="text" id="m-name" aria-label="Full name"></label>
+  <label>City <input type="text" id="m-city" aria-label="City"></label>
+  <label>ZIP <input type="text" id="m-zip" aria-label="ZIP"></label>
+  <button type="button" id="m-submit" onclick="document.getElementById('m-status').textContent='submitted'">Send</button>
+</form>
+<p id="m-status">not submitted</p>
+<h2>Extra addresses (slice-31)</h2>
+<form action="#" onsubmit="return false">
+  <label>Home address <input type="text" id="p-home"></label>
+  <label>Work address <input type="text" id="p-work"></label>
+  <input type="text" id="p-nolabel" value="">
+  <input type="text" aria-label="Orphan">
+</form>
+<h2>Preferences (slice-25)</h2>
+<form action="#" onsubmit="return false">
+  <label><input type="checkbox" id="p-news"> News</label>
+  <label><input type="checkbox" id="p-terms"> Terms</label>
+  <label><input type="radio" name="p-plan" id="p-plan-basic"> Basic</label>
+  <label><input type="radio" name="p-plan" id="p-plan-pro"> Pro</label>
+</form>
+<h2>Choices (slice-26)</h2>
+<form action="#" onsubmit="return false">
+  <label>Country <select id="p-country">
+    <option value="">Choose…</option>
+    <option value="ng">Nigeria</option>
+    <option value="ke">Kenya</option>
+  </select></label>
+  <label>Tie-break <select id="p-tie">
+    <option value="same">First</option>
+    <option value="other">same</option>
+  </select></label>
+  <label>Language <select id="p-lang">
+    <option value="en-us">English</option>
+    <option value="en-gb">English</option>
+  </select></label>
+  <label>Frozen <select id="p-frozen" disabled>
+    <option value="x">X</option>
+  </select></label>
+  <label>Multi <select id="p-multi" multiple>
+    <option value="a">A</option>
+    <option value="b">B</option>
+  </select></label>
+</form>
+<script>
+document.getElementById('echo').addEventListener('input',
+  e => document.getElementById('echo-out').textContent = e.target.value);
+setTimeout(() => {
+  const b = document.createElement('button');
+  b.id = 'delayed'; b.textContent = 'I arrive late';
+  b.onclick = () => document.getElementById('status').textContent = 'late-clicked';
+  document.body.appendChild(b);
+}, 800);
+</script>
+<div style="height:2000px"></div>
+<p id="bottom-marker">bottom reached</p>
+</body>
+</html>
