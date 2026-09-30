@@ -1,0 +1,48 @@
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "lakra"
+version = "0.1.0"
+description = "Local-first, deterministic browser automation agent with L0-L4 policy enforcement"
+readme = "README.md"
+requires-python = ">=3.11"
+authors = [
+    { name = "Nikhil Lakra", email = "nikhillakra2007@gmail.com" }
+]
+license = { text = "MIT" }
+keywords = [
+    "ai-agent",
+    "browser-automation",
+    "playwright",
+    "policy-enforcement",
+    "safety-governance",
+    "deterministic-ai"
+]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+    "Topic :: Software Development :: Testing",
+]
+dependencies = [
+    "playwright>=1.40.0",
+    "psutil>=5.9.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0.0",
+]
+
+[project.urls]
+Homepage = "https://github.com/nikhillakra2007-tech/personal-agent"
+Repository = "https://github.com/nikhillakra2007-tech/personal-agent.git"
+Tracker = "https://github.com/nikhillakra2007-tech/personal-agent/issues"
+
+[tool.setuptools.packages.find]
+where = ["src"]

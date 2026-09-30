@@ -17,7 +17,7 @@ Change from the starting sketch (§5 of the brief): the linear pipeline gains
 (1) an explicit **VERIFY → continue/retry/replan/ask/stop fan-out**, and
 (2) a **registry-backed TOOL ROUTER** instead of a hard-coded tool list.
 Both changes come directly from the Paperclip study and are explained in
-`docs/architecture/overview.md`.
+`docs/architecture/system/overview.md`.
 
 ## 2. Build Order (thin vertical slices)
 
@@ -70,5 +70,5 @@ slice-06; control plane never imports an SDK.
 
 `compileall` + focused snippet replays now; pytest from slice-01 (contract +
 policy truth tables, lock atomicity, audit replay); scripted browser replays
-from slice-04 ( seed `docs/architecture/testing.md`). Manual verification
+from slice-04 ( seed `docs/architecture/system/testing.md`). Manual verification
 checklist per slice in `tasks.md`.

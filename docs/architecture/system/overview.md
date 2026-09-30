@@ -69,7 +69,7 @@ imports; large model downloads now.
 
 ## 5. Scheduler / Resource / MCP (summaries; detail docs linked)
 
-- **Scheduler** (`docs/architecture/policy-scheduler-resources.md` §2):
+- **Scheduler** (`docs/architecture/governance/policy-scheduler-resources.md` §2):
   priority queue, resource + lock admission, pause/resume/cancel, per-task
   ownership; physical input is the mutex.
 - **Resources** (same doc §3): poll RAM/CPU (psutil-class), GPU (nVidia NVML /
