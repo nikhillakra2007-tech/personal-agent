@@ -5,7 +5,7 @@
 **Local-first, deterministic browser automation engineered with strict dual-plane isolation and L0–L4 policy enforcement.**
 
 [![Python](https://img.shields.io/badge/Python-3.11%20%7C%203.12-3776AB?style=for-the-badge&logo=python&logoColor=white)](https://python.org)
-[![Tests Passing](https://img.shields.io/badge/Tests-546%20Passing-success?style=for-the-badge&logo=pytest&logoColor=white)](https://github.com/nikhillakra2007-tech/personal-agent)
+[![Tests Passing](https://img.shields.io/badge/Tests-617%20Passing-success?style=for-the-badge&logo=pytest&logoColor=white)](https://github.com/nikhillakra2007-tech/personal-agent)
 [![V1 Demo](https://img.shields.io/badge/V1%20Demo-30%2F30%20PASS-brightgreen?style=for-the-badge)](docs/reports/demo-v1.md)
 [![Safety Model](https://img.shields.io/badge/Safety-L0--L4%20Refusal--First-blueviolet?style=for-the-badge)](docs/contracts/policy-schema.md)
 [![License](https://img.shields.io/badge/License-MIT-blue?style=for-the-badge)](LICENSE)
@@ -14,6 +14,7 @@
 [Execution Roads](#-execution-roads) •
 [Safety & Policy](#%EF%B8%8F-policy--safety-model) •
 [Quickstart](#-quickstart) •
+[Design Intelligence](#-design-intelligence--uiux-pro-max) •
 [Directory Structure](#-repository-structure) •
 [Verification](#-testing--validation)
 
@@ -33,6 +34,7 @@ Every action undergoes multi-phase ground verification, runtime resource checkin
 - 🔄 **Dual-Plane Separation**: The **Control Plane** solely reasons and decides; the **Execution Plane** solely acts under strict capability tokens.
 - 🔐 **Cross-Process Approvals**: Consequential actions halt in pending state with an atomic approval token until settled via an independent CLI process (`approve.py`).
 - 📜 **Append-Only Auditing**: Every event, plan, transition, and verdict is preserved in a tamper-evident audit ledger.
+- 🎨 **UI/UX Pro Max Intelligence**: Built-in design intelligence engine with 79 styles, 192 palettes, 74 font pairings, 119 UX guidelines, and 25 chart types.
 
 ---
 
@@ -79,10 +81,11 @@ Lakra organizes browser workflows into specialized, robust execution pathways:
 |---|---|:---:|
 | **`observe`** | Navigates to target, takes a snapshot, and verifies content presence | ✅ Yes |
 | **`follow`** | Grounds target link/button, performs navigation click, and verifies destination | ✅ Yes |
+| **`click`** | Grounds unique clickable element, performs deterministic click, and verifies post-click mutation | ✅ Yes |
 | **`search`** | Locates query input, types search term, triggers submit, and verifies result listings | ✅ Yes |
 | **`form`** | Resolves form fields, populates inputs, and gates submission behind human approval | ⚙️ Explicit Flags |
 | **`loop`** | Bounded iteration across repeating DOM structures (e.g. paginated links) | ⚙️ Explicit Flags |
-| **`chain`** | Sequential multi-leg execution composing 2–4 roads into a coordinated task | ⚙️ `--chain-file` |
+| **`chain`** | Sequential multi-leg execution composing 2–4 roads (including `click` legs) | ⚙️ `--chain-file` |
 
 ---
 
@@ -138,6 +141,11 @@ playwright install chromium
 python scripts/lakra_do.py --goal "Show me the records page at file:///c:/data/index.html" --yes
 ```
 
+#### Natural Language Click & Verification
+```powershell
+python scripts/lakra_do.py --goal "Open file:///c:/data/page.html, click the Continue button, and verify Welcome" --yes
+```
+
 #### Natural Language Search & Verification
 ```powershell
 python scripts/lakra_do.py --goal "Search for robotics at file:///c:/data/search.html and confirm results" --yes
@@ -145,6 +153,10 @@ python scripts/lakra_do.py --goal "Search for robotics at file:///c:/data/search
 
 #### Explicit Road Execution
 ```powershell
+# Explicit Click Road
+python scripts/lakra_do.py --road click --url "https://example.com" --text "Continue" --expect "Welcome" --yes
+
+# Explicit Observe Road
 python scripts/lakra_do.py --road observe --url "https://example.com" --expect "Example Domain" --yes
 ```
 
@@ -160,6 +172,32 @@ python scripts/approve.py <APPROVAL_ID>
 
 ---
 
+## 🎨 Design Intelligence & UI/UX Pro Max
+
+This repository integrates the [UI/UX Pro Max](https://github.com/nextlevelbuilder/ui-ux-pro-max-skill) design intelligence engine inside [`.agents/`](.agents/) for UI/UX generation, design systems, and frontend interfaces:
+
+- **Design Systems**: Generate full design systems for products or niches:
+  ```powershell
+  python .agents/skills/ui-ux-pro-max/scripts/search.py "fintech analytics dashboard" --design-system
+  ```
+- **Targeted Domain Queries**:
+  ```powershell
+  # Styles (bento, neo-brutalism, minimal, glassmorphism)
+  python .agents/skills/ui-ux-pro-max/scripts/search.py "bento" --domain style
+
+  # Color Palettes & Contrast
+  python .agents/skills/ui-ux-pro-max/scripts/search.py "cyberpunk neon" --domain color
+
+  # Typography & Pairings
+  python .agents/skills/ui-ux-pro-max/scripts/search.py "editorial luxury" --domain typography
+
+  # UX & Accessibility Guidelines
+  python .agents/skills/ui-ux-pro-max/scripts/search.py "accessible button focus" --domain ux
+  ```
+- **Included Design Skills**: `ui-ux-pro-max`, `design-system`, `ui-styling`, `banner-design`, `brand`, and `slides`.
+
+---
+
 ## 📁 Repository Structure
 
 The project follows a systematic, modular organization where non-code directories adhere to a clean 2–3 file grouping:
@@ -170,9 +208,14 @@ personal-agent/
 ├── README.md                   # Repository documentation & guide
 ├── PROFILE.md                  # GitHub Profile template (nikhillakra2007-tech)
 │
+├── .agents/                    # Design Intelligence & Agent Customizations
+│   ├── AGENTS.md               # Workspace UI/UX directives & behavior rules
+│   ├── rules/                  # Global/workspace rules (ui-ux-pro-max.md)
+│   └── skills/                 # 7 installed skills (ui-ux-pro-max, design-system, etc.)
+│
 ├── docs/                       # Specifications & System Documentation (2 files)
 │   ├── VERSION                 # Current release version
-│   ├── capability-matrix.md    # Capability & feature matrix
+│   ├── capability-matrix.md    # Capability & feature matrix (all roads including click)
 │   ├── architecture/           # Architecture Blueprints (2 subfolders)
 │   │   ├── system/             # Core architecture (3 files: overview, browser, testing)
 │   │   └── governance/         # Policy & thresholds (3 files: consistency, policy, resources)
@@ -188,7 +231,7 @@ personal-agent/
 │   └── replays/                # Historical development slice verification harnesses
 │
 ├── specs/                      # Formal Feature Specifications
-│   └── 001-lakra-v1/           # V1 formal spec, plan, and task checklists (3 files)
+│   └── 001-lakra-v1/           # V1 formal spec, plan, tasks, and click road briefs
 │
 ├── src/lakra/                  # Core Python Package
 │   ├── control/                # Analyzer, Planner, Policy Engine, Scheduler, Store
@@ -196,7 +239,7 @@ personal-agent/
 │   ├── models/                 # Model provider abstractions & deterministic proposal
 │   └── resources/              # RAM, CPU, and GPU resource monitors
 │
-└── tests/                      # Full Pytest Test Suite (546 tests)
+└── tests/                      # Full Pytest Test Suite (617 tests)
     └── fixtures/               # HTML fixture environments for browser test cases
 ```
 
@@ -207,11 +250,11 @@ personal-agent/
 Lakra maintains comprehensive test coverage verifying every state machine transition, guard, and DOM action:
 
 ```powershell
-# Run the complete test suite (546 tests)
+# Run the complete test suite (617 tests)
 pytest tests -q
 
-# Run CLI and Acceptance integration tests
-pytest tests/test_cli_do.py tests/test_cli_visibility.py tests/test_acceptance.py -q
+# Run Click road and Chain integration tests
+pytest tests/test_click_road.py tests/test_click_shaping.py tests/test_chain_click.py tests/test_chain_status.py -q
 
 # Run the full V1 end-to-end acceptance demo (30/30 PASS)
 python scripts/demo_v1.py

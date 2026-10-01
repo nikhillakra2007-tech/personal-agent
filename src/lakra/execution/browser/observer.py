@@ -428,6 +428,93 @@ def collect_submits(page: Page) -> tuple:
     return tuple(out)
 
 
+def collect_clicks(page: Page) -> tuple:
+    """Inventory clickable targets as (label, ref) pairs.
+
+    Union of link texts (clicked via the executor's text rung,
+    follow-road precedent) and non-submit buttons resolved to #id
+    selectors. Submit-kind controls are EXCLUDED here by design:
+    input[type=submit] and button[type=submit] belong exclusively to
+    the L3-gated submit path, and admitting them would let
+    browser.click dodge the browser.submit approval gate (policy keys
+    on action kind, not target). Omitted outright: password-adjacent,
+    hidden, disabled, or unlabeled elements; javascript: and
+    fragment-only link targets; duplicate labels (first wins).
+    Bounded, never raises — degradation is fewer/no targets.
+    Click-road inventory (composed click road).
+    """
+    out: list[tuple[str, str]] = []
+    seen: set[str] = set()
+
+    def take(label: str, ref: str) -> None:
+        text = _norm_label(label)
+        if text and text not in seen:
+            seen.add(text)
+            out.append((text, ref))
+
+    def usable(ctrl) -> bool:
+        try:
+            return not ctrl.is_disabled()
+        except Exception:
+            return False
+
+    try:
+        anchors = page.locator("a[href]")
+        total = anchors.count()
+    except Exception:
+        total = 0
+    for i in range(min(total, MAX_LINK_PROBES)):
+        if len(out) >= MAX_LINKS:
+            break
+        try:
+            href = (anchors.nth(i).get_attribute("href") or "").strip()
+            text = " ".join((anchors.nth(i).inner_text() or "").split())
+        except Exception:
+            continue  # races with page mutation; skip, don't fail
+        if not text or not href:
+            continue
+        if href.startswith("#") or href.lower().startswith("javascript:"):
+            continue
+        take(text[:MAX_LINK_TEXT_CHARS], text[:MAX_LINK_TEXT_CHARS])
+    try:
+        buttons = page.locator("button")
+        n_btn = buttons.count()
+    except Exception:
+        n_btn = 0
+    for i in range(n_btn):
+        if len(out) >= MAX_CONTROLS:
+            break
+        try:
+            ctrl = buttons.nth(i)
+            if ((ctrl.get_attribute("type") or "").strip().lower()
+                    == "submit"):
+                continue  # L3-gated submit path owns these
+            cid = (ctrl.get_attribute("id") or "").strip()
+            if not cid or not usable(ctrl):
+                continue
+            label = ""
+            try:
+                label = (ctrl.inner_text() or "").strip()
+            except Exception:
+                pass
+            if not label:
+                try:
+                    label = (ctrl.get_attribute("aria-label") or "")\
+                        .strip()
+                except Exception:
+                    pass
+            if not label:
+                try:
+                    label = (ctrl.get_attribute("value") or "").strip()
+                except Exception:
+                    pass
+            if label:
+                take(label, f"#{cid}")
+        except Exception:
+            continue
+    return tuple(out)
+
+
 def capture_snapshot(page: Page, shot_dir: str | Path | None = None,
                      take_shot: bool = True) -> Snapshot:
     # CDP Accessibility domain: structured tree WITHOUT page.evaluate

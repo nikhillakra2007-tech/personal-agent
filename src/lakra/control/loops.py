@@ -434,6 +434,67 @@ def run_follow_task(taskloop: TaskLoop, open_page, read_links,
     return taskloop.run_goal(task, hints, decider)
 
 
+# -- composed entry (click road only) ----------------------------------------
+
+def run_click_task(taskloop: TaskLoop, open_page, read_clicks,
+                   task, goal: dict, decider):
+    """Goal -> observe -> ground -> TaskLoop.run_goal (click road).
+
+    goal = {"click_url", "click_text", "expect_text"}.
+    open_page(click_url) and read_clicks() -> [(label, ref)] are
+    caller-provided browser seams (same precedent as inventory_fn
+    and Runner.observe — control never touches browser internals).
+    Grounding binds the caller-stated click_text to one observed
+    clickable target via the existing deterministic ground_click()
+    (unique winner; link text for the executor's text rung or a #id
+    selector; submit-kind controls never enter the inventory, so a
+    browser.click here can never dodge the L3 browser.submit gate).
+    Execution is the standard click template through
+    TaskLoop.run_goal (policy, guards, verification, persistence,
+    existing audit taxonomy). No new executors, predicates,
+    templates, policy, hint keys, or event types; no model; no
+    loop/follow/form/observe/dispatcher logic. Refusals at any
+    pre-plan stage return STOPPED RunResult(plan_id="-", steps_done=0)
+    with a single PLAN_OUTCOME audit entry (the TaskLoop.run_goal
+    refusal shape) and touch nothing else. Post-grounding outcomes
+    (DONE/STOPPED/PAUSED) pass through untouched.
+    """
+    from .analyzer import UnknownGoalError, ground_click
+    from .runner import RunResult
+    audit = taskloop.runner.audit
+
+    def refuse(detail: str) -> RunResult:
+        audit.log("PLAN_OUTCOME", task.task_id,
+                  {"plan_id": "-", "status": "STOPPED",
+                   "steps_done": 0, "detail": detail})
+        return RunResult(plan_id="-", status="STOPPED", steps_done=0,
+                         detail=detail)
+
+    if not isinstance(goal, dict):
+        return refuse("malformed goal: not a mapping")
+    missing = [k for k in ("click_url", "click_text", "expect_text")
+               if k not in goal]
+    if missing:
+        return refuse(f"malformed goal: missing {missing}")
+    if read_clicks is None:
+        return refuse("inventory unavailable: no click inventory seam")
+    try:
+        open_page(goal["click_url"])
+    except Exception as exc:
+        return refuse(f"cannot open page ({exc})")
+    try:
+        inventory = list(read_clicks() or [])
+    except Exception as exc:
+        return refuse(f"inventory failed ({exc})")
+    try:
+        selector = ground_click(goal["click_text"], inventory)
+    except UnknownGoalError as exc:
+        return refuse(f"no groundable click target ({exc})")
+    hints = {"url": goal["click_url"], "selector": selector,
+             "expect_text": goal["expect_text"]}
+    return taskloop.run_goal(task, hints, decider)
+
+
 # -- composed entry (slice-43, observe road only) ---------------------------
 
 def run_observe_task(taskloop: TaskLoop, task, goal: dict, decider):
@@ -663,13 +724,14 @@ FOLLOW_KEYS = ("list_url", "goal_text", "body_expect")
 LINK_KEYS = ("list_url", "goal_text", "body_expect",
              "max_items", "max_iters")
 FORM_KEYS = ("form_url", "goal_slots", "submit_selector")
+CLICK_KEYS = ("click_url", "click_text", "expect_text")
 OBSERVE_KEYS = ("url", "expect_text")
 SEARCH_KEYS = ("search_url", "query", "submit_selector", "expect_text",
                 "submit_phrase")
 
 
 def run_task(taskloop: TaskLoop, store, open_page, read_links,
-             read_controls, task, goal: dict, decider):
+             read_controls, task, goal: dict, decider, read_clicks=None):
     """Route one union goal to exactly one composed road (slice-35).
 
     Routing is key presence only, fixed precedence, never probed and
@@ -677,6 +739,8 @@ def run_task(taskloop: TaskLoop, store, open_page, read_links,
 
       goal_slots present (and no link/loop keys) -> run_form_task;
       max_items/max_iters present (and no form keys) -> run_linked_task;
+      click_url/click_text present (and no other road keys)
+        -> run_click_task;
       list_url/goal_text/body_expect only -> run_follow_task;
       url/expect_text only -> run_observe_task;
       search_url/query/submit_selector/expect_text only
@@ -690,7 +754,7 @@ def run_task(taskloop: TaskLoop, store, open_page, read_links,
     identical to calling that road directly. read_links/read_controls
     are passed through untouched and must satisfy the chosen road's
     own seam contract (pairs for follow, texts for loop, controls
-    for form). A refused road is never
+    for form, label/ref pairs for click). A refused road is never
     retried on another road (no fall-through). Dispatcher-level
     refusals return STOPPED RunResult(plan_id="-", steps_done=0) with
     a single PLAN_OUTCOME audit entry; road results (RunResult or
@@ -717,10 +781,12 @@ def run_task(taskloop: TaskLoop, store, open_page, read_links,
     has_form_addr = "form_url" in goal or "submit_selector" in goal
     has_observe = "url" in goal or "expect_text" in goal
     has_search = ("search_url" in goal or "query" in goal)
+    has_click = "click_url" in goal or "click_text" in goal
     # submit_selector/expect_text are native to the search shape too,
     # so only foreign indicators count here (slice-44).
     if has_search and (("goal_slots" in goal) or ("form_url" in goal)
-                       or has_loop or has_link or ("url" in goal)):
+                       or has_loop or has_link or has_click
+                       or ("url" in goal)):
         return refuse("mixed road keys: search keys cannot combine with"
                       " other road keys")
     if has_search:
@@ -730,6 +796,19 @@ def run_task(taskloop: TaskLoop, store, open_page, read_links,
         sub = {k: goal[k] for k in SEARCH_KEYS if k in goal}
         return run_search_task(taskloop, open_page, read_controls,
                                task, sub, decider)
+    # Click branch (click road): routed before the link and observe
+    # branches because expect_text is native here but would otherwise
+    # satisfy has_observe and drop the click target (the Slice-48
+    # misroute). Only "url" counts as foreign observe evidence;
+    # expect_text alone is native to the click shape.
+    if has_click and (has_form or has_loop or has_link or has_search
+                      or has_form_addr or ("url" in goal)):
+        return refuse("mixed road keys: click keys cannot combine with"
+                      " other road keys")
+    if has_click:
+        sub = {k: goal[k] for k in CLICK_KEYS if k in goal}
+        return run_click_task(taskloop, open_page, read_clicks,
+                              task, sub, decider)
     if has_observe and (has_form or has_loop or has_link
                         or has_form_addr):
         return refuse("mixed road keys: observe keys cannot combine with"

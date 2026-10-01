@@ -228,3 +228,25 @@ def test_ground_match_empty_malformed_stopword_refused():
         ground_match("Type my password into batch records", links)
     with pytest.raises(UnknownGoalError):
         ground_match("Show syllabus", links)  # zero span
+
+
+def test_url_keywords_do_not_create_intent():
+    # Slice-47 URL-substring leak fix: intent classification runs on
+    # goal prose with URLs removed, so a path segment such as
+    # "submit" can never vote for a road.
+    hints = analyze("Show me the page at file:///nosubmit.html")
+    assert hints["url"] == "file:///nosubmit.html"
+    assert hints.get("intent") == "observe"
+    assert analyze(
+        "Show me the page at file:///x-search.html").get("intent") == \
+        "observe"
+    assert analyze(
+        "Show me the page at file:///followup.html").get("intent") == \
+        "observe"
+    # Genuine prose intent still works when the URL is neutral.
+    assert analyze(
+        "Submit the form at file:///f.html").get("intent") == \
+        "fill-submit"
+    assert analyze(
+        "Web search for cats at file:///s.html").get("intent") == \
+        "search"

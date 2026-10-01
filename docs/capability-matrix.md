@@ -34,20 +34,37 @@ exactly that. Slices 01–43 built, 460/460 green, demo 30/30 PASS.
 - Loops (cursor-unrolled `links_matching`, ≤5, establish-per-cycle,
   first-empty end, budget precheck, per-iteration L3) + follow /
   form / observe composed roads behind the key-presence
-  dispatcher (slice-43 completes the family: every planner template
-  is now goal-reachable).
+  dispatcher.
 - Search road (slice-44): navigate → grounded query box → type+verify
   → identical L3 submit gate (every search parks once) → results
   verification. Policy untouched.
+- Click road (click-road slice): open page → ground click target
+  (link texts + non-submit buttons, unique-winner-or-refuse; submit
+  controls excluded so `browser.click` can never dodge the L3
+  `browser.submit` gate) → existing click template → `text_contains`
+  verification under the existing L1 policy. With this road every
+  planner template is now goal-reachable through the dispatcher.
+- Chain click legs (slice-49): "click" joins SINGLE_ROADS; each
+  click leg dispatches through the unchanged `run_click_task` on
+  the sibling non-completing runner with the live click inventory
+  seam. All chain invariants hold (2–4 legs, stop-on-first-failure,
+  no mid-chain completion, per-leg approvals, `--from-leg`).
+- Chain status visibility (slice-50): `--status` (text + JSON)
+  exposes per-leg road/outcome for chain tasks, derived read-only
+  from the task goal, audit trail, and persisted plan hints
+  (latest-wins per leg across `--from-leg` reruns; chain-level
+  refusals show no legs). `--list` semantics unchanged.
 - Chained multi-template runs (slice-45): 2–4 single-road legs under
   one task on a sibling non-completing runner; per-leg routing goals
   with restore; first non-DONE leg ends the chain; loop legs refused;
   no cross-leg data piping (each leg re-grounds fresh).
-- Natural-language goal shaping (slice-46/47): deterministic prose →
-  road goal dict for observe, follow (with arrival phrase), and
-  search (with submit-control grounding); all other intents refuse
-  with explicit-flag guidance; no model calls; policy, guards, and
-  the L3 gate untouched; explicit --road CLI byte-identical.
+- Natural-language goal shaping (slice-46/47 + NL click):
+  deterministic prose → road goal dict for observe, follow (with
+  arrival phrase), search (with submit-control grounding), and
+  click (with target phrase grounded by the click road); remaining
+  intents refuse with explicit-flag guidance; no model calls;
+  policy, guards, and the L3 gate untouched; explicit --road CLI
+  byte-identical.
 - Re-planning (genuine, one bounded replan with supersede-freeze) +
   failure recovery fan-out (retry → replan → ask → stop).
 - Task persistence (SQLite, WAL, versioned), task listing/status
@@ -79,10 +96,10 @@ exactly that. Slices 01–43 built, 460/460 green, demo 30/30 PASS.
 
 ## MISSING (no implementation)
 
-- NL shaping for click/form/loop roads (slice-46/47 shapes observe,
-  follow, and search; the rest refuse with explicit-flag guidance —
-  page addressing, typed slot values, and safety bounds cannot be
-  honestly derived from prose).
+- NL shaping for form/loop roads (observe, follow, search, and
+  click shape; the rest refuse with explicit-flag guidance — typed
+  slot values and safety bounds cannot be honestly derived from
+  prose).
 - Login/session workflows, downloads/uploads (`accept_downloads`
   is `False`; no transfer tooling), table-content grounding
   consumer, screenshot-grounded (visual-fallback) clicking.
@@ -115,9 +132,8 @@ exactly that. Slices 01–43 built, 460/460 green, demo 30/30 PASS.
 
 ## Next roadmap item (proposed, not started)
 
-- **NL shaping for the remaining roads** (click/form/loop):
-  slice-46/47 shaped observe, follow, and search; the rest refuse
-  with guidance. A future slice could extend shaping to click (if
-  selector grounding lands) or form (if typed-slot extraction from
-  prose is deemed safe). Alternative: scheduler-tick daemon for
+- **NL shaping for the remaining roads** (form/loop): observe,
+  follow, search, and click shape; the rest refuse with guidance.
+  Form shaping still needs typed-slot extraction from prose
+  (deemed unsafe). Alternative: scheduler-tick daemon for
   unattended runs. Owner's choice; explicitly not started.

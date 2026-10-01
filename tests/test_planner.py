@@ -255,3 +255,21 @@ def test_existing_goals_do_not_reroute_to_follow():
          "submit_selector": "#send"})
     assert [s.action.kind for s in fill.steps] == \
         ["browser.navigate", "browser.type", "browser.submit"]
+
+
+def test_url_keywords_do_not_steer_template():
+    # Slice-47 URL-substring leak fix: template routing classifies the
+    # goal prose with URLs removed, so a path segment such as
+    # "submit" can never vote for a template.
+    plan = Planner().plan(
+        task("Show me the Records page at file:///nosubmit.html"),
+        {"url": "file:///nosubmit.html", "expect_text": "Records"})
+    assert [s.action.kind for s in plan.steps] == \
+        ["browser.navigate", "browser.snapshot"]
+    # Genuine prose intent still routes correctly with a neutral URL.
+    fill = Planner().plan(
+        task("Submit the assignment form at file:///f.html"),
+        {"url": URL, "selector": "#name", "text": "Ann",
+         "submit_selector": "#send"})
+    assert [s.action.kind for s in fill.steps] == \
+        ["browser.navigate", "browser.type", "browser.submit"]

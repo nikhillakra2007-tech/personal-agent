@@ -83,7 +83,10 @@ def analyze(goal_text: str) -> dict:
             if len(word) > len(best):
                 best = word
         hints["expect_text"] = best
-    intent = _intent(lowered)
+    # URL text is addressing, not intent (same principle as the word
+    # scan above): classify on the goal prose with URLs removed so a
+    # path segment can never vote for a road.
+    intent = _intent(URL_RE.sub(" ", lowered))
     if intent:
         hints["intent"] = intent
     if "url" not in hints and "expect_text" not in hints:
@@ -359,5 +362,47 @@ def ground_submit(phrase: str, submits) -> str:
     if len(winners) > 1:
         raise UnknownGoalError(
             f"ambiguous submit {[l for l, _ in winners]}:"
+            " refuse, never guess")
+    return winners[0][1]
+
+
+def ground_click(phrase: str, clicks) -> str:
+    """Ground a click-target phrase to an observed clickable target.
+
+    Composed click road: binds the caller-stated target phrase
+    ("Continue", "Next page") against the observed click inventory
+    (collect_clicks: link texts + non-submit button #ids) using the
+    same unique-winner-or-refuse pattern as ground_submit. Returns
+    the winning ref (link text for the executor's text rung, or a
+    #id selector). Submit-kind controls must never reach this
+    inventory (excluded at collection); any such entry is malformed
+    here. Refuses (UnknownGoalError, never a guess):
+    empty/malformed inventory, zero overlap, or tied winners.
+    Pure function.
+    """
+    lowered = _check_goal(phrase)
+    try:
+        items = [(label, ref) for label, ref in clicks]
+    except (TypeError, ValueError) as exc:
+        raise UnknownGoalError(f"malformed clicks: {exc}")
+    if not items:
+        raise UnknownGoalError("empty clicks: nothing to ground in")
+    for label, ref in items:
+        if (not isinstance(label, str) or not label.strip()
+                or not isinstance(ref, str) or not ref.strip()):
+            raise UnknownGoalError("malformed clicks: bad entry")
+    phrase_words = set(_content_words(lowered))
+    if not phrase_words:
+        raise UnknownGoalError("phrase carries no groundable words")
+    scored = [(len(phrase_words & set(_content_words(label))), label,
+               ref) for label, ref in items]
+    best = max(s for s, _, _ in scored)
+    if best < 1:
+        raise UnknownGoalError("no clickable target overlaps the phrase")
+    winners = sorted((label, ref) for s, label, ref in scored
+                     if s == best)
+    if len(winners) > 1:
+        raise UnknownGoalError(
+            f"ambiguous click target {[l for l, _ in winners]}:"
             " refuse, never guess")
     return winners[0][1]

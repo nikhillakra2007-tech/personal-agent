@@ -31,10 +31,12 @@ Usage:
     .\\.venv\\Scripts\\python.exe scripts\\lakra_do.py --road search
         --url <search page> --query "cathedrals" --submit "#q-go"
         --expect "Cathedral results" [--yes | --no | --poll SECS]
+    .\\.venv\\Scripts\\python.exe scripts\\lakra_do.py --road click
+        --url <page> --text "Continue" --expect "Welcome" [--yes]
 
-Natural-language goal shaping (slice-46/47: deterministic prose -> road
-goal dict; observe, follow, and search shape, all other intents refuse
-with guidance; no model calls, policy untouched):
+Natural-language goal shaping (slice-46/47 + NL click: deterministic
+prose -> road dict; observe, follow, search, and click shape, all
+other intents refuse with guidance; no model calls, policy untouched):
     .\\.venv\\Scripts\\python.exe scripts\\lakra_do.py
         --goal "Show me the records page at file:///l.html" [--yes]
     .\\.venv\\Scripts\\python.exe scripts\\lakra_do.py
@@ -43,6 +45,9 @@ with guidance; no model calls, policy untouched):
     .\\.venv\\Scripts\\python.exe scripts\\lakra_do.py
         --goal "Web search for cats at file:///s.html and confirm
         results for cats" [--yes | --no | --poll SECS]
+    .\\.venv\\Scripts\\python.exe scripts\\lakra_do.py
+        --goal "Open file:///c.html, click the Continue button, and
+        verify Welcome" [--yes]
 
 Chained multi-template runs (slice-45: sequential supervised legs,
 one task; loop legs refused; first non-DONE leg ends the chain):
@@ -102,6 +107,7 @@ from lakra.execution.browser.controller import (  # noqa: E402
 )
 from lakra.execution.browser.observer import (  # noqa: E402
     BrowserObserver,
+    collect_clicks,
     collect_controls,
     collect_links,
 )
@@ -112,7 +118,7 @@ from lakra.resources.monitor import ResourceMonitor  # noqa: E402
 
 USAGE = (__doc__ or "").strip()
 
-ROADS = ("follow", "loop", "form", "observe", "search")
+ROADS = ("follow", "loop", "form", "observe", "search", "click")
 
 
 class UsageError(ValueError):
@@ -183,7 +189,7 @@ def build_goal(opts: dict) -> dict:
     road = opts.get("road")
     if road not in ROADS:
         raise UsageError(
-            "--road must be one of follow|loop|form|observe|search")
+            "--road must be one of follow|loop|form|observe|search|click")
     url = opts.get("url")
     if not url:
         raise UsageError(f"--road {road} needs --url")
@@ -212,6 +218,12 @@ def build_goal(opts: dict) -> dict:
         return {"search_url": url, "query": {"text": opts["query"]},
                 "submit_selector": opts["submit"],
                 "expect_text": opts["expect"]}
+    if road == "click":
+        _forbid(opts, road, "max_items", "max_iters", "slots_json",
+                "submit", "query")
+        _need(opts, road, "text", "expect")
+        return {"click_url": url, "click_text": opts["text"],
+                "expect_text": opts["expect"]}
     _forbid(opts, road, "text", "expect", "max_items", "max_iters")
     _need(opts, road, "slots_json", "submit")
     try:
@@ -233,6 +245,8 @@ def default_task_goal(road: str, opts: dict) -> str:
         return f"Observe {opts.get('text', 'the page')}"
     if road == "search":
         return f"Web search {opts.get('query', 'the query')}"
+    if road == "click":
+        return f"Click {opts.get('text', 'the control')}"
     return "Submit the form"
 
 
@@ -378,6 +392,134 @@ def summarize_event(event: dict) -> str:
     return f"{event.get('ts', '?')} {event.get('type', '?')}{tail}"
 
 
+# -- chain visibility (slice-50, read-only) --------------------------------------
+# Derives per-leg chain status from existing persisted state only: the
+# task goal ("Chain of N legs", set by --chain-file), the task-filtered
+# audit trail, and persisted plan hints. Pure reads (SELECTs + replay);
+# no writes, no new events, no new state, no execution.
+#
+# Derivation rules (all deterministic, audit-ordered):
+# - Not a chain task unless the persisted goal is exactly
+#   "Chain of <N> legs". Total legs come from that goal.
+# - Each terminal PLAN_OUTCOME for a non-superseded plan closes one
+#   leg segment; the road comes from that plan's persisted hints
+#   (key shape, same vocabulary as the dispatcher). Replanned
+#   (superseded) plans are skipped: a leg is its final plan.
+# - DONE advances to the next leg; anything else holds the index so
+#   a --from-leg rerun overwrites the same slot (latest wins).
+# - A plan_id "-" outcome is a pre-plan refusal: chain-level when it
+#   carries an "invalid chain"/"invalid from_leg" detail (legs stay
+#   empty), else the current leg's STOPPED with road unknown.
+# - chain_id comes from the TASK_LIFECYCLE payload when the chain
+#   finished DONE; otherwise it is genuinely unknown (None), never
+#   invented.
+
+def _chain_total_legs(goal) -> int | None:
+    prefix, suffix = "Chain of ", " legs"
+    if not isinstance(goal, str):
+        return None
+    if not (goal.startswith(prefix) and goal.endswith(suffix)):
+        return None
+    try:
+        total = int(goal[len(prefix):-len(suffix)])
+    except (TypeError, ValueError):
+        return None
+    if total < 1:
+        return None
+    return total
+
+
+def _road_of_hints(hints: dict) -> str:
+    if not isinstance(hints, dict):
+        return "unknown"
+    if "fields" in hints:
+        return "form"
+    if "link_text" in hints:
+        return "follow"
+    if "submit_selector" in hints and "text" in hints:
+        return "search"
+    if "selector" in hints:
+        return "click"
+    if "url" in hints:
+        return "observe"
+    return "unknown"
+
+
+def chain_summary(db, task, events):
+    """Per-leg chain picture, or None for non-chain tasks.
+
+    Pure reads. Returns {"chain_id", "total_legs", "legs_done",
+    "legs": [{"index", "road", "status"}]} with 1-based indices in
+    order, or None when the task goal is not a chain goal.
+    """
+    from lakra.control import plan_store
+    total = _chain_total_legs(task.goal if task is not None else "")
+    if total is None:
+        return None
+    mine = [e for e in (events or []) if e.get("task_id") == task.task_id]
+    superseded = set()
+    for e in mine:
+        if e.get("type") == "PLAN_SUPERSEDED":
+            old = (e.get("payload") or {}).get("old_plan")
+            if isinstance(old, str) and old:
+                superseded.add(old)
+    chain_id = None
+    for e in mine:
+        if e.get("type") == "TASK_LIFECYCLE":
+            cid = (e.get("payload") or {}).get("chain_id")
+            if isinstance(cid, str) and cid:
+                chain_id = cid
+
+    def road_of(pid):
+        try:
+            _, hints, _ = plan_store.load_plan(db, pid)
+        except Exception:
+            return "unknown"
+        return _road_of_hints(hints)
+
+    slots: dict = {}
+    by_pid: dict = {}
+    open_pid = None
+    idx = 1
+    for e in mine:
+        etype = e.get("type")
+        payload = e.get("payload") or {}
+        if etype == "PLAN_CREATED":
+            pid = payload.get("plan_id")
+            if (isinstance(pid, str) and pid and pid != "-"
+                    and pid not in superseded and open_pid is None):
+                open_pid = pid
+        elif etype == "PLAN_OUTCOME":
+            pid = payload.get("plan_id")
+            status = payload.get("status")
+            if open_pid is not None and pid == open_pid:
+                if idx <= total:
+                    slots[idx] = {"index": idx, "road": road_of(pid),
+                                  "status": status}
+                    by_pid[pid] = idx
+                open_pid = None
+                if status == "DONE":
+                    idx += 1
+            elif isinstance(pid, str) and pid and pid != "-" \
+                    and pid in by_pid:
+                # A plan may record a transient outcome (ASK_PENDING
+                # while parked) before its terminal one; latest wins.
+                slots[by_pid[pid]]["status"] = status
+            elif pid == "-":
+                detail = payload.get("detail") or ""
+                if detail.startswith("invalid chain (") or \
+                        detail.startswith("invalid from_leg"):
+                    continue  # chain-level refusal: no leg started
+                if idx <= total:
+                    slots[idx] = {"index": idx, "road": "unknown",
+                                  "status": status}
+    legs = [slots[n] for n in sorted(slots)]
+    return {"chain_id": chain_id, "total_legs": total,
+            "legs_done": sum(1 for leg in legs
+                             if leg["status"] == "DONE"),
+            "legs": legs}
+
+
 # -- machine-readable visibility (slice-40) ------------------------------------
 # Closed schemas: every key below is named explicitly, so a future src/
 # field can never leak through output code that doesn't name it. The
@@ -462,11 +604,25 @@ def render_list_json(tasks) -> str:
     return json.dumps({"tasks": [task_to_json(t) for t in rows]})
 
 
-def render_status_json(task, info_or_reason, pending_ids, tail) -> str:
-    return json.dumps({"task": task_to_json(task),
-                       "resume": resume_to_json(info_or_reason),
-                       "pending_approvals": list(pending_ids),
-                       "audit_tail": [event_to_json(e) for e in tail]})
+def chain_to_json(chain) -> dict:
+    """Closed chain keys (slice-50): only keys derived from existing
+    persisted state (task goal, audit trail, plan hints)."""
+    return {"chain_id": chain["chain_id"],
+            "total_legs": chain["total_legs"],
+            "legs_done": chain["legs_done"],
+            "legs": [{"index": leg["index"], "road": leg["road"],
+                      "status": leg["status"]} for leg in chain["legs"]]}
+
+
+def render_status_json(task, info_or_reason, pending_ids, tail,
+                       chain=None) -> str:
+    out = {"task": task_to_json(task),
+           "resume": resume_to_json(info_or_reason),
+           "pending_approvals": list(pending_ids),
+           "audit_tail": [event_to_json(e) for e in tail]}
+    if chain is not None:
+        out["chain"] = chain_to_json(chain)
+    return json.dumps(out)
 
 
 def check_format(opts: dict) -> str:
@@ -488,9 +644,11 @@ def render_list(tasks) -> str:
         for t in rows)
 
 
-def render_status(task, info_or_reason, pending_ids, tail) -> str:
+def render_status(task, info_or_reason, pending_ids, tail,
+                    chain=None) -> str:
     """Full one-task picture. info_or_reason is the resume_info() dict
-    or its refusal text; tail is already task-filtered audit events."""
+    or its refusal text; tail is already task-filtered audit events;
+    chain is the chain_summary() dict or None for non-chain tasks."""
     lines = [
         f"task: {task.task_id}",
         f"goal: {short_goal(task.goal, 200)}",
@@ -529,6 +687,13 @@ def render_status(task, info_or_reason, pending_ids, tail) -> str:
         lines.append("pending approvals: " + ", ".join(pending_ids))
     else:
         lines.append("pending approvals: none")
+    if chain is not None:
+        lines.append(f"chain: {chain['chain_id'] or 'unknown'}")
+        lines.append(f"legs: {chain['legs_done']}/{chain['total_legs']}"
+                     " done")
+        for leg in chain["legs"]:
+            lines.append(f"  {leg['index']}. {leg['road']}"
+                         f" - {leg['status']}")
     lines.append(f"audit tail ({len(tail)}):")
     lines.extend("  " + summarize_event(e) for e in tail)
     return "\n".join(lines)
@@ -605,10 +770,12 @@ def run_status(opts: dict, audit_path, db_path=None) -> int:
         pending_ids = [a["approval_id"] for a in approvals.pending()
                        if a["task_id"] == task_id]
         tail = [e for e in events if e.get("task_id") == task_id][-last:]
+        chain = chain_summary(db, task, events)
         if format_name == "json":
-            print(render_status_json(task, info, pending_ids, tail))
+            print(render_status_json(task, info, pending_ids, tail,
+                                     chain))
         else:
-            print(render_status(task, info, pending_ids, tail))
+            print(render_status(task, info, pending_ids, tail, chain))
         return 0
     finally:
         try:
@@ -765,9 +932,12 @@ def run_chain_file(argv, opts, audit_path, profile_dir, shots_dir,
         def read_controls():
             return list(collect_controls(hands.page))
 
+        def read_clicks():
+            return list(collect_clicks(hands.page))
+
         res = run_chain(taskloop, db, hands.open, read_pairs,
                         read_controls, task, chain, decider,
-                        from_leg=from_leg)
+                        from_leg=from_leg, read_clicks=read_clicks)
     except Exception as exc:
         print(f"error: {exc}")
         return 1
@@ -813,9 +983,10 @@ def run_visibility(opts: dict) -> int:
 def run_goal(argv, opts, audit_path, profile_dir, shots_dir,
              monitor) -> int:
     """Run a natural-language goal: shape prose to a road goal dict
-    (slice-46/47). The shaper is deterministic and refusal-first;
-    observe, follow (with arrival phrase), and search (with
-    submit-control grounding) shape. The shaped dict flows through
+    (slice-46/47 + NL click). The shaper is deterministic and
+    refusal-first; observe, follow (with arrival phrase), search
+    (with submit-control grounding), and click (with target phrase
+    grounded by the click road) shape. The shaped dict flows through
     the same run_task() as the explicit path, so policy, guards, and
     the L3 gate are untouched. Exit codes mirror single runs: 0 DONE,
     2 denied, 1 anything else."""
@@ -888,8 +1059,12 @@ def run_goal(argv, opts, audit_path, profile_dir, shots_dir,
         def read_controls():
             return list(collect_controls(hands.page))
 
+        def read_clicks():
+            return list(collect_clicks(hands.page))
+
         res = run_task(taskloop, db, hands.open, read_pairs,
-                       read_controls, task, shaped, decider)
+                       read_controls, task, shaped, decider,
+                       read_clicks=read_clicks)
     except Exception as exc:
         print(f"error: {exc}")
         return 1
@@ -991,9 +1166,13 @@ def main(argv: list[str]) -> int:
         def read_controls():
             return list(collect_controls(hands.page))
 
+        def read_clicks():
+            return list(collect_clicks(hands.page))
+
         read_links = read_texts if road == "loop" else read_pairs
         res = run_task(taskloop, db, hands.open, read_links,
-                       read_controls, task, goal, decider)
+                       read_controls, task, goal, decider,
+                       read_clicks=read_clicks)
     except Exception as exc:
         print(f"error: {exc}")
         return 1

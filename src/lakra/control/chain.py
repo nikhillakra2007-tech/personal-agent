@@ -1,9 +1,9 @@
 """Slice-45: chained multi-template runs (sequential supervised legs).
 
 A chain is an ordered list of 2-4 legs, each naming one single-result
-road (follow | observe | form | search) with that road's exact existing
-goal dict. run_chain() drives the legs in order through the unchanged
-dispatcher, stopping at the first leg that cannot continue.
+road (follow | observe | form | search | click) with that road's exact
+existing goal dict. run_chain() drives the legs in order through the
+unchanged dispatcher, stopping at the first leg that cannot continue.
 
 Composition notes (all precedents, no new machinery):
 
@@ -43,13 +43,14 @@ from .tasks import Status
 
 MAX_LEGS = 4
 MIN_LEGS = 2
-SINGLE_ROADS = ("follow", "observe", "form", "search")
+SINGLE_ROADS = ("follow", "observe", "form", "search", "click")
 
 LEG_KEYS = {
     "follow": ("list_url", "goal_text", "body_expect"),
     "observe": ("url", "expect_text"),
     "form": ("form_url", "goal_slots", "submit_selector"),
     "search": ("search_url", "query", "submit_selector", "expect_text"),
+    "click": ("click_url", "click_text", "expect_text"),
 }
 
 
@@ -83,6 +84,8 @@ def leg_goal_text(leg: dict) -> str:
         query = leg.get("query")
         text = query.get("text") if isinstance(query, dict) else query
         return f"Web search {text or 'the query'}"
+    if road == "click":
+        return f"Click {leg.get('click_text', 'the control')}"
     return "Chained leg"
 
 
@@ -117,15 +120,17 @@ def validate_chain(chain: dict) -> list:
 
 
 def run_chain(taskloop: TaskLoop, store, open_page, read_links,
-              read_controls, task, chain: dict, decider,
-              observe=None, from_leg: int = 1):
+               read_controls, task, chain: dict, decider,
+               observe=None, from_leg: int = 1, read_clicks=None):
     """Drive a validated chain to DONE/STOPPED/PAUSED.
 
     Returns ChainResult; preconditions fail as shaped STOPPED results
     (single PLAN_OUTCOME audit entry, plan_id "-", like every composed
     entry). from_leg is 1-based: resume an explicit rerun at leg N;
     legs_done counts absolutely (skipped legs asserted done by the
-    operator's explicit rerun).
+    operator's explicit rerun). read_clicks supplies the click
+    inventory seam for click legs (same contract as the standalone
+    click road); click legs without it refuse cleanly.
     """
     from .loops import run_task
     audit = taskloop.runner.audit
@@ -164,7 +169,8 @@ def run_chain(taskloop: TaskLoop, store, open_page, read_links,
         for n, leg in enumerate(legs[from_leg - 1:], from_leg):
             task.goal = leg_goal_text(leg)
             res = run_task(loop, sibling.store, open_page, read_links,
-                           read_controls, task, leg, decider)
+                           read_controls, task, leg, decider,
+                           read_clicks=read_clicks)
             steps += res.steps_done
             if res.status == "DONE":
                 done = n
@@ -182,6 +188,18 @@ def run_chain(taskloop: TaskLoop, store, open_page, read_links,
                        f" stopped: {res.detail}")
     finally:
         task.goal = original_goal
+        try:
+            # Repair routing text leaked into the persisted row by
+            # mid-chain status transitions (set_status persists the
+            # whole in-memory object, which moves per leg above).
+            # The DB row must keep the chain goal per this module's
+            # contract; lifecycle semantics are untouched (no
+            # transition, same status rewritten).
+            from . import task_store
+            task_store.update_task(
+                store if store is not None else base.store, task)
+        except Exception:
+            pass  # chain outcome stands; repair is best-effort here
     try:
         reg = base.controller.router.registry
         if reg.get(task.task_id).status == Status.RUNNING:

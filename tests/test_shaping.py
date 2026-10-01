@@ -209,6 +209,9 @@ def test_search_refuses_without_query():
 
 
 def test_click_refuses_no_selector():
+    # NL click shaping exists now: bare "Click the toggle" (no URL,
+    # no verifiable content) still refuses, with click-specific
+    # guidance naming the full explicit alternative.
     import pytest
     with pytest.raises(UnknownGoalError) as exc:
         shape_goal("Click the toggle")
@@ -445,6 +448,27 @@ def test_cli_goal_rejects_empty_prose(tmp_path):
     proc = run_cli(tmp_path, "--goal", "  ", "--yes")
     assert proc.returncode == 1, proc.stdout + proc.stderr
     assert "usage error" in proc.stdout
+
+
+def test_url_keywords_do_not_create_false_ambiguity():
+    # Slice-47 URL-substring leak fix: ambiguity checks run on prose
+    # with URLs removed. A filename like "nosubmit" must not trigger
+    # a fill-submit match; genuine prose intent still shapes, and
+    # genuine multi-intent prose still refuses.
+    shaped = shape_goal(
+        "Show me the Records page at file:///nosubmit.html")
+    assert shaped == {"url": "file:///nosubmit.html",
+                      "expect_text": "Records"}
+    shaped = shape_goal(
+        "Web search for cats at file:///x-follow.html"
+        " and confirm results")
+    assert shaped["search_url"] == "file:///x-follow.html"
+    assert shaped["query"] == {"text": "cats"}
+    import pytest
+    with pytest.raises(UnknownGoalError) as exc:
+        shape_goal("Follow the Beta record and submit the form"
+                   " on file:///l.html and show me the detail")
+    assert "ambiguous" in str(exc.value)
 
 
 def test_explicit_road_path_unchanged(tmp_path):

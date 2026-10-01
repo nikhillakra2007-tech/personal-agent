@@ -7,14 +7,16 @@ completes what prose can honestly supply; everything else refuses with
 guidance.
 
 Roads shaped: observe, follow (with arrival phrase), search (with
-submit-control grounding). Roads refused: click, form, loop (page
-addressing / typed values / safety bounds the shaper cannot invent).
+submit-control grounding), click (with target phrase grounded by the
+click road). Roads refused: form, loop (typed values / safety bounds
+the shaper cannot invent).
 """
 
 from __future__ import annotations
 
 from .analyzer import (
     INTENT_NAMES,
+    SECRET_WORDS,
     STOPWORDS,
     TEMPLATES,
     URL_RE,
@@ -29,12 +31,11 @@ ARRIVAL_CONNECTORS = (
     "arriving at", "landing on", "and arrive at", "and land on",
 )
 
-SHAPABLE_INTENTS = ("observe", "follow", "search")
+SHAPABLE_INTENTS = ("observe", "follow", "search", "click")
 
-UNSUPPORTED_INTENTS = ("click", "fill-submit", "loop")
+UNSUPPORTED_INTENTS = ("fill-submit", "loop")
 
 REFUSAL_GUIDANCE = {
-    "click": "click needs a selector; use --road click or a form/search road",
     "fill-submit": "form needs typed slot values; use --road form --slots-json",
     "loop": "loop needs --max-items/--max-iters bounds; use --road loop",
 }
@@ -118,6 +119,63 @@ def _shape_search(prose: str, url: str) -> dict:
             "submit_phrase": "search", "expect_text": expect_text}
 
 
+def _shape_click(prose: str, url: str) -> dict:
+    """Shape a click goal from prose.
+
+    Prose structure: "Open <url>, click the <target> button, and
+    verify <expect>". Target = content words between the click verb
+    and the expect marker (or URL). Expect_text = content words
+    after "verify"/"confirm" (required: the click template must
+    verify against caller-stated text). The target phrase is grounded
+    later by the click road against the observed click inventory
+    (submit-kind controls excluded there); nothing here invents a
+    selector.
+    """
+    prose_lower = prose.lower()
+    url_idx = prose_lower.find(url.lower()) if url else -1
+    verb_at = -1
+    verb_end = -1
+    for marker in ("click ", "toggle ", "press "):
+        idx = prose_lower.find(marker)
+        if idx != -1 and (verb_at == -1 or idx < verb_at):
+            verb_at = idx
+            verb_end = idx + len(marker)
+    expect_at = -1
+    expect_end = -1
+    for marker in ("and verify ", "and confirm ", "verify ", "confirm "):
+        idx = prose_lower.find(marker)
+        if idx != -1 and (expect_at == -1 or idx < expect_at):
+            expect_at = idx
+            expect_end = idx + len(marker)
+    target = ""
+    if verb_end != -1:
+        end = len(prose)
+        if expect_at != -1 and expect_at > verb_end:
+            end = min(end, expect_at)
+        if url_idx > verb_end:
+            end = min(end, url_idx)
+        words = _content_words(prose[verb_end:end])
+        if words:
+            target = " ".join(words)
+    if not target:
+        raise UnknownGoalError(
+            "click goals need a target (which control to click);"
+            " add it to the prose or use --road click --text")
+    expect_text = ""
+    if expect_end != -1:
+        rest_no_url = URL_RE.sub(" ", prose[expect_end:])
+        words = _content_words(rest_no_url)
+        if words:
+            expect_text = " ".join(words)
+    if not expect_text:
+        raise UnknownGoalError(
+            "click goals need expected verification text (what the"
+            " page shows after the click); add it to the prose or"
+            " use --road click --expect")
+    return {"click_url": url, "click_text": target,
+            "expect_text": expect_text}
+
+
 def _shape_follow(prose: str, url: str) -> dict:
     """Shape a follow goal from prose with an arrival phrase."""
     prose_no_url = URL_RE.sub(" ", prose)
@@ -148,14 +206,19 @@ def _shape_follow(prose: str, url: str) -> dict:
 def shape_goal(prose: str) -> dict:
     """Prose -> road goal dict. Raises UnknownGoalError on any refusal.
 
-    Pure function. Reuses analyzer.analyze for extraction. Only observe
-    and follow (with arrival phrase) shape; all other intents refuse
-    with guidance. Ambiguous, multi-step, credential-laden, or empty
-    prose refuses.
+    Pure function. Reuses analyzer.analyze for extraction. Observe,
+    follow (with arrival phrase), search (with query), and click
+    (with target phrase and verification text) shape; all other
+    intents refuse with guidance. Ambiguous, multi-step,
+    credential-laden, or empty prose refuses.
     """
     if not isinstance(prose, str) or not prose.strip():
         raise UnknownGoalError("empty goal")
     prose_lower = prose.lower()
+    # URL text is addressing, not intent: ambiguity and guidance checks
+    # run on the prose with URLs removed so a path segment such as
+    # "nosubmit" can never vote for a road.
+    prose_no_url_lower = URL_RE.sub(" ", prose_lower)
     for marker in MULTI_STEP_MARKERS:
         if marker in prose_lower:
             raise UnknownGoalError(
@@ -164,8 +227,18 @@ def shape_goal(prose: str) -> dict:
     try:
         hints = analyze(prose)
     except UnknownGoalError as exc:
+        # Credential refusals keep precedence: never mask them with
+        # road guidance. (Same word scan as analyzer.analyze.)
+        words = set(prose_lower.replace("=", " ").replace(":", " ")
+                    .split())
+        if not (words & SECRET_WORDS):
+            if "click" in _matching_intents(prose_no_url_lower):
+                raise UnknownGoalError(
+                    "click goals need a URL, a target phrase, and"
+                    " verification text; use --road click"
+                    " --url/--text/--expect") from exc
         for name in UNSUPPORTED_INTENTS:
-            if name in _matching_intents(prose_lower):
+            if name in _matching_intents(prose_no_url_lower):
                 raise UnknownGoalError(REFUSAL_GUIDANCE[name]) from exc
         raise
     url = hints.get("url")
@@ -174,7 +247,7 @@ def shape_goal(prose: str) -> dict:
     if intent is None:
         raise UnknownGoalError(
             f"no road matches goal {prose!r}; use --road with one of"
-            " follow|loop|form|observe|search")
+            " follow|loop|form|observe|search|click")
     if intent == "follow":
         if not url:
             raise UnknownGoalError(
@@ -201,15 +274,27 @@ def shape_goal(prose: str) -> dict:
             raise UnknownGoalError(
                 "search goals need a URL; add it to the prose or use"
                 " --road search --url")
-        other_intents = [n for n in _matching_intents(prose_lower)
+        other_intents = [n for n in _matching_intents(prose_no_url_lower)
                          if n != "search"]
         if other_intents:
             raise UnknownGoalError(
                 f"ambiguous: matches search and {', '.join(other_intents)};"
                 " rephrase or use --road")
         return _shape_search(prose, url)
+    if intent == "click":
+        if not url:
+            raise UnknownGoalError(
+                "click goals need a URL; add it to the prose or use"
+                " --road click --url")
+        other_intents = [n for n in _matching_intents(prose_no_url_lower)
+                         if n != "click"]
+        if other_intents:
+            raise UnknownGoalError(
+                f"ambiguous: matches click and {', '.join(other_intents)};"
+                " rephrase or use --road")
+        return _shape_click(prose, url)
     if intent == "observe":
-        other_intents = [n for n in _matching_intents(prose_lower)
+        other_intents = [n for n in _matching_intents(prose_no_url_lower)
                          if n != "observe"]
         if other_intents:
             raise UnknownGoalError(
@@ -234,4 +319,4 @@ def shape_goal(prose: str) -> dict:
         raise UnknownGoalError(REFUSAL_GUIDANCE[intent])
     raise UnknownGoalError(
         f"no road matches goal {prose!r}; use --road with one of"
-        " follow|loop|form|observe|search")
+        " follow|loop|form|observe|search|click")

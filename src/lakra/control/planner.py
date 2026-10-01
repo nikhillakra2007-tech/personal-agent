@@ -32,6 +32,7 @@ Templates (first keyword match wins):
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from uuid import uuid4
@@ -40,6 +41,12 @@ from ..execution.browser.controller import BrowserStep
 from ..execution.browser.verification import Predicate
 from .policy import Action
 from .tasks import Task
+
+# Mirrors analyzer.URL_RE (kept local: analyzer imports this module, so
+# importing it here would be circular). URL text is addressing, not
+# intent: template routing classifies the goal prose with URLs removed
+# so a path segment can never vote for a template.
+_URL_RE = re.compile(r"(https?://\S+|file://\S+)")
 
 
 class UnknownGoalError(ValueError):
@@ -395,7 +402,7 @@ TEMPLATES = (
 class Planner:
     def plan(self, task: Task, hints: dict | None = None) -> Plan:
         hints = validate_hints(dict(hints or {}))
-        goal = task.goal.lower()
+        goal = _URL_RE.sub(" ", task.goal.lower())
         for keywords, factory in TEMPLATES:
             if any(k in goal for k in keywords):
                 steps = factory(task.task_id, hints or {})
