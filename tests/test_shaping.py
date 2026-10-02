@@ -477,3 +477,62 @@ def test_explicit_road_path_unchanged(tmp_path):
     assert proc.returncode == 0, proc.stdout + proc.stderr
     assert "status: DONE" in proc.stdout
     assert "road: observe" in proc.stdout
+
+
+# -- V1-D3: credential-shaped NL form intent keeps credential refusal --------
+# A credential-laden goal that also matches the fill-submit intent must
+# produce the promised credential-shaped refusal, not generic form
+# guidance. The refusal happens in the pure shaper (and in run_goal
+# before any browser/DB work), so nothing can be filled, submitted,
+# parked, or consumed.
+
+def test_credential_form_refuses_credential():
+    import pytest
+    with pytest.raises(UnknownGoalError) as exc:
+        shape_goal("Fill the password at file:///vault.html"
+                   " with secret hunter2 and submit")
+    assert str(exc.value) == "credential-laden goals are refused"
+
+
+def test_credential_submit_wording_still_refuses_credential():
+    import pytest
+    for prose in ("Submit my password at file:///vault.html",
+                  "Fill the passwd field at file:///vault.html"
+                  " and submit it"):
+        with pytest.raises(UnknownGoalError) as exc:
+            shape_goal(prose)
+        assert str(exc.value) == "credential-laden goals are refused"
+
+
+def test_non_credential_form_guidance_unchanged():
+    import pytest
+    with pytest.raises(UnknownGoalError) as exc:
+        shape_goal("Submit the form at file:///f.html")
+    assert "--slots-json" in str(exc.value)
+    assert "credential" not in str(exc.value)
+
+
+def test_unsupported_form_intent_unchanged():
+    import pytest
+    # Loop-flavored prose without secrets keeps its existing refusal.
+    with pytest.raises(UnknownGoalError):
+        shape_goal("Follow every batch record on file:///l.html")
+
+
+def test_credential_goal_refused_before_browser_execution(tmp_path):
+    """run_goal refuses credential prose before sessions, database,
+    approvals, or audit are touched: no approval rows, no audit file."""
+    import sys
+    sys.path.insert(0, str(ROOT / "scripts"))
+    import lakra_do
+    audit_path = tmp_path / "audit-do.jsonl"
+    assert not audit_path.exists()
+    opts = {"allow_domains": [],
+            "goal": "Fill the password at file:///vault.html"
+                    " with secret hunter2 and submit"}
+    rc = lakra_do.run_goal(["--goal", opts["goal"], "--yes"], opts,
+                           audit_path, tmp_path / "prof",
+                           tmp_path / "shots", HealthyMonitor())
+    assert rc == 1
+    assert not audit_path.exists()  # refused before anything launches
+

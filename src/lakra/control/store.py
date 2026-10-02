@@ -12,7 +12,7 @@ import os
 import sqlite3
 from pathlib import Path
 
-CODE_VERSION = 5
+CODE_VERSION = 6
 BUSY_TIMEOUT_MS = 5000
 
 SCHEMA_V1 = """
@@ -156,6 +156,42 @@ CREATE INDEX IF NOT EXISTS idx_failures_task ON failure_records(task_id);
 """
 
 
+# v5 -> v6: persisted work queue + run ledger (V2-02). Work items
+# survive process death and are claimed atomically across processes;
+# the ledger records which process claimed what and how each run
+# ended, so stale claims are detectable and reclaimable while
+# completed work can never run again. Existing tables untouched.
+MIGRATE_V5_TO_V6 = """
+CREATE TABLE IF NOT EXISTS work_items (
+    work_id TEXT PRIMARY KEY,
+    input_prose TEXT,
+    legs_json TEXT,
+    from_leg INTEGER NOT NULL DEFAULT 1,
+    state TEXT NOT NULL,
+    owner TEXT,
+    attempts INTEGER NOT NULL DEFAULT 0,
+    task_id TEXT,
+    detail TEXT,
+    created_at TEXT NOT NULL,
+    claimed_at TEXT,
+    lease_until INTEGER NOT NULL DEFAULT 0,
+    updated_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_work_state ON work_items(state,
+    created_at);
+CREATE TABLE IF NOT EXISTS runs (
+    run_id TEXT PRIMARY KEY,
+    work_id TEXT NOT NULL,
+    owner TEXT NOT NULL,
+    claimed_at TEXT NOT NULL,
+    ended_at TEXT,
+    outcome TEXT,
+    detail TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_runs_work ON runs(work_id);
+"""
+
+
 class SchemaError(RuntimeError):
     """Unknown/newer schema version: fail closed."""
 
@@ -200,7 +236,8 @@ class Database:
             self.conn.executescript(MIGRATE_V2_TO_V3)
             self.conn.executescript(MIGRATE_V3_TO_V4)
             self.conn.executescript(MIGRATE_V4_TO_V5)
-            self.conn.execute("INSERT INTO meta(key, value) VALUES ('v', '5')")
+            self.conn.executescript(MIGRATE_V5_TO_V6)
+            self.conn.execute("INSERT INTO meta(key, value) VALUES ('v', '6')")
             self.conn.commit()
             return
         row = self.conn.execute(
@@ -229,10 +266,13 @@ class Database:
             self.conn.executescript(MIGRATE_V4_TO_V5)
             version = 5
         if version == 5:
+            self.conn.executescript(MIGRATE_V5_TO_V6)
+            version = 6
+        if version == 6:
             # Already current: objects exist by construction of the chain
             # above. No safety-net re-runs: re-executing old DDL against
             # diverged historic tables breaks (found via migration test).
-            self.conn.execute("UPDATE meta SET value='5' WHERE key='v'")
+            self.conn.execute("UPDATE meta SET value='6' WHERE key='v'")
             self.conn.commit()
             return
         raise SchemaError(f"unreachable schema version {version}")

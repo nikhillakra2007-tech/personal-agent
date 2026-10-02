@@ -84,9 +84,9 @@ def test_migration_v1_to_v2(tmp_path):
     con.execute("CREATE TABLE tasks(task_id TEXT PRIMARY KEY, goal TEXT)")
     con.commit()
     con.close()
-    db = Database(path)  # migrates v1 -> v5, preserves tasks rows
+    db = Database(path)  # migrates v1 -> v6, preserves tasks rows
     assert db.execute("SELECT value FROM meta WHERE key='v'").fetchone()[0] \
-        == "5"
+        == "6"
     assert db.execute("SELECT name FROM sqlite_master WHERE name='plans'"
                       ).fetchone() is not None
     assert db.execute("SELECT name FROM sqlite_master WHERE"

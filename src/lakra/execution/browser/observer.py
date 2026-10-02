@@ -157,12 +157,16 @@ def _fetch_ax_tree(page: Page) -> dict:
 
 def collect_links(page: Page) -> tuple:
     """Inventory anchors as (text, href) pairs: visible text (whitespace-
-    normalized, capped) mapped to its target. Same-text links keep the
-    first; javascript:, fragment-only, and empty targets are omitted (no
-    value to a follower); probing is bounded. Never raises: degradation
-    is an empty inventory, and per-anchor failures skip that anchor."""
+    normalized, capped) mapped to its target. V1-D2: dedup key is
+    (text, href) — byte-identical repeats keep the first, but the same
+    visible label on different targets stays distinct so link
+    grounding sees every candidate and refuses the ambiguity instead
+    of silently following the first. javascript:, fragment-only, and
+    empty targets are omitted (no value to a follower); probing is
+    bounded. Never raises: degradation is an empty inventory, and
+    per-anchor failures skip that anchor."""
     out: list[tuple[str, str]] = []
-    seen: set[str] = set()
+    seen: set[tuple[str, str]] = set()
     try:
         anchors = page.locator("a[href]")
         total = anchors.count()
@@ -180,9 +184,10 @@ def collect_links(page: Page) -> tuple:
             continue
         if href.startswith("#") or href.lower().startswith("javascript:"):
             continue
-        if text in seen:
+        key = (text, href)
+        if key in seen:
             continue
-        seen.add(text)
+        seen.add(key)
         out.append((text[:MAX_LINK_TEXT_CHARS], href))
     return tuple(out)
 

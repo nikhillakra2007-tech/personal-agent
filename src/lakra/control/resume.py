@@ -39,6 +39,15 @@ def _pending_approvals(db, task_id: str) -> list[str]:
     return [row[0] for row in cur.fetchall()]
 
 
+def pending_approval_ids(db, task_id: str) -> list[str]:
+    """Public read of undecided approval ids for one task (slice-51).
+
+    Additive wrapper over the existing pending-approvals query; pure
+    read, no behavior change to resume_info()/resume_task().
+    """
+    return _pending_approvals(db, task_id)
+
+
 def _settled_approvals(db, task_id: str) -> list[str]:
     cur = db.execute("SELECT approval_id FROM approvals WHERE task_id=?"
                      " AND decided IS NOT NULL ORDER BY decided_at",

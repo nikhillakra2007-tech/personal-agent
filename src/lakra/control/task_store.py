@@ -82,13 +82,19 @@ def insert_task(db, task: Task) -> None:
 
 
 def update_task(db, task: Task) -> None:
+    # V1-D1: goal is write-once at insert_task() and is EXCLUDED here.
+    # run_chain() mutates task.goal in memory per leg for planner
+    # routing; that routing text must never persist (a mid-chain death
+    # would otherwise overwrite the "Chain of N legs" marker and the
+    # task would lose its chain identity). All other columns persist
+    # exactly as before; no schema change.
     row = task_to_row(task)
-    db.execute("UPDATE tasks SET goal=?, parent_id=?, status=?, priority=?,"
+    db.execute("UPDATE tasks SET parent_id=?, status=?, priority=?,"
                " permission_level=?, allowed_tools=?, allowed_domains=?,"
                " allowed_paths=?, submission_policy=?, budget=?,"
                " created_at=?, updated_at=?, history=?, verification=?,"
                " error=?, owner=? WHERE task_id=?",
-               row[1:] + row[:1])
+               row[2:] + row[:1])
     db.commit()
 
 

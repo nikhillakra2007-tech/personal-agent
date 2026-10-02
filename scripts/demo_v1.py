@@ -26,7 +26,7 @@ PY = sys.executable
 
 LOOP_INDEX = (ROOT / "tests" / "fixtures" / "loop-index.html").as_uri()
 FORM_PAGE = (ROOT / "tests" / "fixtures" / "courses.html").as_uri()
-BASELINE_TESTS = 617
+BASELINE_TESTS = 702
 
 FORM_SLOTS = {"name": {"text": "Ada"}, "city": {"text": "Lagos"},
               "zip": {"text": "10001"}, "news": {"checked": True},

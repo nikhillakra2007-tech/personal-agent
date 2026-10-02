@@ -54,6 +54,43 @@ exactly that. Slices 01–43 built, 460/460 green, demo 30/30 PASS.
   from the task goal, audit trail, and persisted plan hints
   (latest-wins per leg across `--from-leg` reruns; chain-level
   refusals show no legs). `--list` semantics unchanged.
+- Chain resume by leg index (slice-51): `--resume TASK_ID
+  --chain-file FILE --from-leg N` re-executes legs N..total on the
+  SAME task through the unchanged `run_chain()` (fresh plans per
+  leg; existing policy/approvals/lifecycle); stale live plans of
+  that task are abandoned via `set_plan_status(..., SUPERSEDED)` +
+  the existing `PLAN_SUPERSEDED` event; terminal/pending/uncertain/
+  non-chain/ownership refusals are read-only before browser launch;
+  bare `--resume` and bare `--chain-file --from-leg` unchanged.
+- Chain goal-marker hardening (V1-D1 fix): the task goal is
+  write-once at insert (`update_task()` never persists `goal`), so
+  leg routing text can never overwrite the "Chain of N legs" marker
+  — chain identity survives mid-chain process death (chain resume
+  and `--status` keep working); bare `--resume` refuses chain tasks
+  read-only with chain-resume guidance. No schema/policy/approval/
+  lifecycle/audit changes.
+- Link-ambiguity hardening (V1-D2 fix): the link inventory dedupes
+  on (text, target), so an exact-duplicate visible label on
+  different targets stays distinct and grounding refuses the tie
+  instead of silently following the first; byte-identical repeats
+  still collapse; unique/no-match/exclusion behavior unchanged.
+- Credential-precedence hardening (V1-D3 fix): a credential-laden NL
+  goal that also matches form/loop intent now yields the promised
+  credential-shaped refusal instead of generic road guidance;
+  refusal precedes any browser/DB/approval work. No policy/approval/
+  audit/schema changes.
+- Deterministic decomposition (V2-01): high-level prose splits into
+  2-4 independently shapable legs (observe/follow/click/search;
+  search submits grounded at the execution edge like --goal) and
+  executes through the unchanged chain machinery on a new task via
+  `--decompose`; pure-shaping refusals precede browser launch. No
+  model calls; no policy/approval/lifecycle/audit/schema changes.
+- Persisted work queue + run ledger (V2-02, schema v6): crash-safe
+  QUEUED/CLAIMED/COMPLETED/FAILED/CANCELLED work items with atomic
+  cross-process CAS claims, lease-based stale reclaim (live claims
+  never stolen, terminal work never reruns), per-claim ledger rows,
+  and a no-execution materialize() seam onto V2-01/chain machinery.
+  No daemon; no policy/approval/lifecycle/audit changes.
 - Chained multi-template runs (slice-45): 2–4 single-road legs under
   one task on a sibling non-completing runner; per-leg routing goals
   with restore; first non-DONE leg ends the chain; loop legs refused;

@@ -228,15 +228,20 @@ def shape_goal(prose: str) -> dict:
         hints = analyze(prose)
     except UnknownGoalError as exc:
         # Credential refusals keep precedence: never mask them with
-        # road guidance. (Same word scan as analyzer.analyze.)
+        # road guidance. (Same word scan as analyzer.analyze, whose
+        # secret check runs first — so when secret words are present
+        # the error here is already the credential refusal. V1-D3:
+        # this previously guarded only the click guidance, letting
+        # fill-submit/loop guidance mask the credential refusal.)
         words = set(prose_lower.replace("=", " ").replace(":", " ")
                     .split())
-        if not (words & SECRET_WORDS):
-            if "click" in _matching_intents(prose_no_url_lower):
-                raise UnknownGoalError(
-                    "click goals need a URL, a target phrase, and"
-                    " verification text; use --road click"
-                    " --url/--text/--expect") from exc
+        if words & SECRET_WORDS:
+            raise
+        if "click" in _matching_intents(prose_no_url_lower):
+            raise UnknownGoalError(
+                "click goals need a URL, a target phrase, and"
+                " verification text; use --road click"
+                " --url/--text/--expect") from exc
         for name in UNSUPPORTED_INTENTS:
             if name in _matching_intents(prose_no_url_lower):
                 raise UnknownGoalError(REFUSAL_GUIDANCE[name]) from exc

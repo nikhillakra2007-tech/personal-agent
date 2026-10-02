@@ -58,6 +58,21 @@ Chained multi-template runs (one task, sequential supervised legs):
     .\\.venv\\Scripts\\python.exe scripts\\lakra_do.py
         --chain-file chain.json [--from-leg N] [--yes | --no | --poll SECS]
 
+Resume an EXISTING chain task from leg N (slice-51: same task id,
+fresh re-execution of legs N..total, stale live plans superseded;
+a bare --chain-file --from-leg run always creates a NEW task):
+    .\\.venv\\Scripts\\python.exe scripts\\lakra_do.py --resume TASK_ID
+        --chain-file chain.json --from-leg N [--yes | --no | --poll SECS]
+
+Decompose a high-level goal into a chain (V2-01: deterministic
+prose -> 2-4 road legs through the unchanged chain machinery; each
+leg must be independently shapable, search submits grounded at the
+execution edge like --goal):
+    .\\.venv\\Scripts\\python.exe scripts\\lakra_do.py
+        --decompose "Show me the records at URL with Records, then
+        follow the Beta record on URL and show me detail record"
+        [--from-leg N] [--yes | --no | --poll SECS]
+
 Resume a stranded task after process death (explicit per-task only;
 no auto-resume, no daemon):
     .\\.venv\\Scripts\\python.exe scripts\\lakra_do.py --resume TASK_ID
@@ -133,9 +148,9 @@ def parse_args(argv: list[str]) -> dict:
                   "--max-iters", "--slots-json", "--submit", "--goal",
                   "--poll", "--audit", "--profile-dir", "--shots-dir",
                   "--allow-domain", "--ram-floor-mb", "--cpu-ceiling",
-                  "--resume", "--status", "--state", "--last", "--format",
-                  "--query", "--chain-file", "--from-leg"}
-    flags = {"--yes", "--no", "--list"}
+                   "--resume", "--status", "--state", "--last", "--format",
+                   "--query", "--chain-file", "--from-leg", "--decompose"}
+    flags = {"--yes", "--no", "--list", "--daemon", "--once"}
     while i < len(argv):
         tok = argv[i]
         if tok in flags:
@@ -797,13 +812,35 @@ def run_resume(argv, opts, audit_path, profile_dir, shots_dir,
     from lakra.control.resume import ResumeRefused, resume_info, resume_task
     for flag in ("road", "url", "text", "expect", "max_items",
                  "max_iters", "slots_json", "submit", "goal", "query",
-                 "chain_file", "from_leg"):
+                 "chain_file", "from_leg", "decompose",
+                 "daemon", "once"):
         if opts.get(flag) is not None:
             print(f"usage error: --resume takes no"
                   f" --{flag.replace('_', '-')}")
             return 1
     if opts.get("allow_domains"):
         print("usage error: --resume takes no --allow-domain")
+        return 1
+    # V1-D1: a chain task must resume as a chain, never as a single
+    # stranded unit (a rescued leg plan would COMPLETE the task with
+    # legs unexecuted, silently bypassing chain semantics). Read-only
+    # check before anything launches.
+    try:
+        _db = Database()
+        try:
+            _guard_task = task_store.load_task(_db, opts["resume"])
+        finally:
+            try:
+                _db.close()
+            except Exception:
+                pass
+    except Exception:
+        _guard_task = None
+    if _guard_task is not None and _chain_total_legs(
+            _guard_task.goal) is not None:
+        print(f"refused: task {opts['resume']} is a chain task;"
+              " resume it with --resume TASK_ID --chain-file FILE"
+              " --from-leg N")
         return 1
     sessions = BrowserSessions(profile_dir)
     db = None
@@ -882,7 +919,8 @@ def run_chain_file(argv, opts, audit_path, profile_dir, shots_dir,
         print("usage error: --chain-file takes no --resume")
         return 1
     for flag in ("road", "url", "text", "expect", "max_items",
-                 "max_iters", "slots_json", "submit", "goal", "query"):
+                 "max_iters", "slots_json", "submit", "goal", "query",
+                 "decompose", "daemon", "once"):
         if opts.get(flag) is not None:
             print(f"usage error: --chain-file takes no"
                   f" --{flag.replace('_', '-')}")
@@ -955,6 +993,489 @@ def run_chain_file(argv, opts, audit_path, profile_dir, shots_dir,
     return finish(res, "chain", task.task_id, registry, audit_path)
 
 
+def run_chain_resume(argv, opts, audit_path, profile_dir, shots_dir,
+                     monitor, db_path=None) -> int:
+    """Resume an EXISTING chain task from leg N (slice-51).
+
+    UX: --resume TASK_ID --chain-file FILE [--from-leg N]. The task
+    keeps its id; legs N..total re-execute fresh (re-observe,
+    re-ground, fresh plans through the unchanged dispatcher) via the
+    existing run_chain(). Stale live plans of this task are abandoned
+    through the existing plan-status mechanism (SUPERSEDED +
+    PLAN_SUPERSEDED audit) before any leg runs.
+
+    All preconditions (chain file, from_leg range, known task,
+    non-terminal, chain task, no pending approvals, no uncertain
+    execution, ownership checkout) pass before the browser launches;
+    any refusal is read-only (exit 1, nothing written, nothing
+    executed). Exit codes mirror chain runs: 0 DONE, 2 denied,
+    1 anything else.
+    """
+    from lakra.control.chain import ChainRefused, run_chain, validate_chain
+    from lakra.control.recovery import find_uncertain
+    from lakra.control.resume import PLAN_LIVE, pending_approval_ids
+    from lakra.control.tasks import TERMINAL
+    for flag in ("road", "url", "text", "expect", "max_items",
+                 "max_iters", "slots_json", "submit", "goal", "query",
+                 "daemon", "once"):
+        if opts.get(flag) is not None:
+            print(f"usage error: --resume --chain-file takes no"
+                  f" --{flag.replace('_', '-')}")
+            return 1
+    if opts.get("allow_domains"):
+        print("usage error: --resume --chain-file takes no --allow-domain")
+        return 1
+    task_id = opts.get("resume")
+    try:
+        with open(opts["chain_file"], encoding="utf-8") as fh:
+            chain = json.load(fh)
+    except (OSError, ValueError) as exc:
+        print(f"usage error: cannot read chain file ({exc})")
+        return 1
+    try:
+        legs = validate_chain(chain)
+    except ChainRefused as exc:
+        print(f"refused: invalid chain ({exc})")
+        return 1
+    try:
+        from_leg = int(opts.get("from_leg", 1))
+    except (TypeError, ValueError):
+        print("usage error: --from-leg must be an integer")
+        return 1
+    if isinstance(from_leg, bool) or not (1 <= from_leg <= len(legs)):
+        print(f"refused: invalid from_leg {opts.get('from_leg', 1)!r}"
+              f" for a {len(legs)}-leg chain")
+        return 1
+    sessions = BrowserSessions(profile_dir)
+    db = None
+    try:
+        db = Database(db_path) if db_path is not None else Database()
+        ns = build_stack(sessions, db, audit_path, shots_dir, monitor)
+        registry = ns["registry"]
+        try:
+            task = registry.get(task_id)
+        except Exception:
+            print(f"refused: unknown task {task_id}")
+            return 1
+        if task.status in TERMINAL:
+            print(f"refused: task {task_id} is {task.status.value};"
+                  " history immutable")
+            return 1
+        if _chain_total_legs(task.goal) is None:
+            print(f"refused: task {task_id} is not a chain task")
+            return 1
+        try:
+            events = ns["audit"].replay()
+        except Exception:
+            events = []
+        pending = pending_approval_ids(db, task_id)
+        if pending:
+            ids = ", ".join(pending)
+            print(f"refused: task {task_id} has undecided approval"
+                  f" {ids}: decide it via approve.py or let it expire,"
+                  " then resume")
+            return 1
+        uncertain = [kind for tid, kind in find_uncertain(events)
+                     if tid == task_id]
+        if uncertain:
+            kinds = ", ".join(uncertain)
+            print(f"refused: task {task_id} has uncertain execution"
+                  f" ({kinds}): started but never completed; re-observe"
+                  " and require a fresh approval, i.e. start a fresh run"
+                  " instead")
+            return 1
+        try:
+            registry.checkout(task_id, "cli")
+        except Exception as exc:
+            print(f"refused: cannot take ownership ({exc})")
+            return 1
+        try:
+            task = registry.refresh(task_id)
+        except Exception as exc:
+            print(f"refused: cannot refresh task state ({exc})")
+            return 1
+        try:
+            sessions.launch()
+        except Exception as exc:
+            print(f"error: cannot launch browser ({exc})")
+            return 1
+        try:
+            sched = ns["sched"]
+            try:
+                sched.enqueue(task_id)
+                steps, _ = task_store.get_usage(db, task_id)
+                if steps:
+                    sched._steps_used[task_id] = steps
+            except Exception:
+                pass
+            if str(task.status.value) == "PAUSED":
+                try:
+                    sched.resume(task_id)
+                    task = registry.get(task_id)
+                except Exception as exc:
+                    print(f"refused: cannot resume paused task ({exc})")
+                    return 1
+            from lakra.control import plan_store
+            for pid in plan_store.plans_for_task(db, task_id):
+                try:
+                    plan, _, _ = plan_store.load_plan(db, pid)
+                except Exception:
+                    continue
+                if plan.status not in PLAN_LIVE:
+                    continue
+                try:
+                    plan_store.set_plan_status(db, pid, "SUPERSEDED")
+                except Exception:
+                    continue  # raced to terminal; already frozen
+                ns["audit"].log("PLAN_SUPERSEDED", task_id,
+                               {"old_plan": pid, "new_plan": "-",
+                                "at_step": 0, "snapshot_chars": 0})
+            try:
+                decider = pick_decider(argv, ns["approvals"], task_id)
+            except UsageError as exc:
+                print(f"usage error: {exc}")
+                return 1
+            hands = ns["hands"]
+
+            def read_pairs():
+                return list(collect_links(hands.page))
+
+            def read_controls():
+                return list(collect_controls(hands.page))
+
+            def read_clicks():
+                return list(collect_clicks(hands.page))
+
+            print(f"resume: task {task_id} ({task.status.value})"
+                  f" -> chain legs {from_leg}..{len(legs)}")
+            res = run_chain(ns["taskloop"], db, hands.open, read_pairs,
+                            read_controls, task, chain, decider,
+                            from_leg=from_leg, read_clicks=read_clicks)
+        except Exception as exc:
+            print(f"error: {exc}")
+            return 1
+    except Exception as exc:
+        print(f"error: {exc}")
+        return 1
+    finally:
+        try:
+            sessions.close()
+        except Exception:
+            pass
+        try:
+            if db is not None:
+                db.close()
+        except Exception:
+            pass
+    return finish(res, "chain", task_id, registry, audit_path)
+
+
+def run_decompose(argv, opts, audit_path, profile_dir, shots_dir,
+                  monitor) -> int:
+    """Run a high-level goal decomposed into a chain (V2-01).
+
+    UX: --decompose PROSE [--from-leg N]. The prose splits into 2-4
+    independently shapable legs through the pure decompose_goal()
+    contract; search legs ground their submit phrase against the
+    observed submit inventory at the execution edge (same precedent
+    as --goal); the finalized legs pass the real validate_chain()
+    and execute through the unchanged run_chain() on a NEW task, so
+    a decomposed run behaves exactly like its hand-written
+    --chain-file equivalent. Pure-shaping refusals happen before
+    the browser launches; nothing else in V1 moves.
+    """
+    from lakra.control.analyzer import ground_submit
+    from lakra.control.chain import ChainRefused, run_chain, validate_chain
+    from lakra.control.decompose import DecomposeRefused, decompose_goal
+    from lakra.control.planner import UnknownGoalError
+    from lakra.execution.browser.observer import collect_submits
+    for flag in ("road", "url", "text", "expect", "max_items",
+                 "max_iters", "slots_json", "submit", "goal", "query",
+                 "chain_file", "resume", "daemon", "once"):
+        if opts.get(flag) is not None:
+            print(f"usage error: --decompose takes no"
+                  f" --{flag.replace('_', '-')}")
+            return 1
+    prose = opts.get("decompose")
+    if not prose or not prose.strip():
+        print("usage error: --decompose needs non-empty prose")
+        return 1
+    try:
+        legs = decompose_goal(prose)
+    except DecomposeRefused as exc:
+        print(f"refused: {exc}")
+        return 1
+    try:
+        from_leg = int(opts.get("from_leg", 1))
+    except (TypeError, ValueError):
+        print("usage error: --from-leg must be an integer")
+        return 1
+    if isinstance(from_leg, bool) or not (1 <= from_leg <= len(legs)):
+        print(f"refused: invalid from_leg {opts.get('from_leg', 1)!r}"
+              f" for a {len(legs)}-leg chain")
+        return 1
+    sessions = BrowserSessions(profile_dir)
+    db = None
+    try:
+        sessions.launch()
+    except Exception as exc:
+        print(f"error: cannot launch browser ({exc})")
+        return 1
+    try:
+        db = Database()
+        ns = build_stack(sessions, db, audit_path, shots_dir, monitor)
+        registry, taskloop, hands = (ns["registry"], ns["taskloop"],
+                                     ns["hands"])
+        approvals = ns["approvals"]
+        for n, leg in enumerate(legs, 1):
+            if leg.get("road") != "search" or "submit_phrase" not in leg:
+                continue
+            try:
+                hands.open(leg["search_url"])
+                submits = list(collect_submits(hands.page))
+                leg["submit_selector"] = ground_submit(
+                    leg["submit_phrase"], submits)
+            except UnknownGoalError as exc:
+                print(f"refused: leg {n} ({exc})")
+                return 1
+            except Exception as exc:
+                print(f"error: cannot ground submit ({exc})")
+                return 1
+            del leg["submit_phrase"]
+        try:
+            validate_chain({"legs": legs})
+        except ChainRefused as exc:
+            print(f"refused: invalid chain ({exc})")
+            return 1
+        print(f"decomposed: {len(legs)} legs"
+              f" ({', '.join(leg['road'] for leg in legs)})")
+        task = registry.add(Task.create(
+            f"Chain of {len(legs)} legs", allowed_tools=["browser"],
+            allowed_domains=opts["allow_domains"] or ["file:"],
+            allowed_paths=[]))
+        registry.checkout(task.task_id, "cli")
+        registry.set_status(task.task_id, Status.RUNNING)
+        ns["sched"].enqueue(task.task_id)
+        try:
+            decider = pick_decider(argv, approvals, task.task_id)
+        except UsageError as exc:
+            print(f"usage error: {exc}")
+            return 1
+
+        def read_pairs():
+            return list(collect_links(hands.page))
+
+        def read_controls():
+            return list(collect_controls(hands.page))
+
+        def read_clicks():
+            return list(collect_clicks(hands.page))
+
+        res = run_chain(taskloop, db, hands.open, read_pairs,
+                        read_controls, task, {"legs": legs}, decider,
+                        from_leg=from_leg, read_clicks=read_clicks)
+    except Exception as exc:
+        print(f"error: {exc}")
+        return 1
+    finally:
+        try:
+            sessions.close()
+        except Exception:
+            pass
+        try:
+            if db is not None:
+                db.close()
+        except Exception:
+            pass
+
+    return finish(res, "chain", task.task_id, registry, audit_path)
+
+
+def run_daemon(argv, opts, audit_path, profile_dir, shots_dir,
+               monitor) -> int:
+    """Supervised worker over the persisted queue (V2-03).
+
+    UX: --daemon [--max-items N] | --once [--max-items N]. Each pass
+    reclaims stale work before claiming fresh FIFO work through the
+    existing work_queue CAS, materializes the item to validated legs,
+    and executes through the unchanged run_chain() on either a fresh
+    task or the item's bound task (chain-resume flow: ownership,
+    usage restore, stale-plan supersede). Task outcomes map 1:1
+    (COMPLETED/CANCELLED/FAILED settle; parked/paused/stalled legs
+    stay CLAIMED under the lease for a later pass). L3 gates park
+    through the existing approval flow (--poll waits, --yes/--no
+    decides); killing the worker mid-claim leaves standard
+    lease-governed recovery. Exit 0 on a clean stop (drained or
+    budget reached), 1 on interrupt or worker error. Orchestration
+    only: no policy, approval, or execution logic lives here.
+    """
+    import os
+    from uuid import uuid4
+
+    from lakra.control import plan_store, task_store, work_queue
+    from lakra.control.chain import run_chain
+    from lakra.control.daemon import serve
+    from lakra.control.resume import PLAN_LIVE
+    from lakra.control.tasks import TERMINAL
+    from lakra.control.work_queue import WorkRefused
+    for flag in ("road", "url", "text", "expect",
+                 "max_iters", "slots_json", "submit", "goal", "query",
+                 "chain_file", "from_leg", "resume", "decompose"):
+        if opts.get(flag) is not None:
+            print(f"usage error: --daemon takes no"
+                  f" --{flag.replace('_', '-')}")
+            return 1
+    once = bool(opts.get("once"))
+    if opts.get("max_items") is not None:
+        try:
+            max_items = int(opts["max_items"])
+        except (TypeError, ValueError):
+            print("usage error: --max-items must be an integer")
+            return 1
+    else:
+        max_items = None
+    owner = f"daemon-{os.getpid()}-{uuid4().hex[:8]}"
+    sessions = BrowserSessions(profile_dir)
+    db = None
+    try:
+        sessions.launch()
+    except Exception as exc:
+        print(f"error: cannot launch browser ({exc})")
+        return 1
+    try:
+        db = Database()
+        ns = build_stack(sessions, db, audit_path, shots_dir, monitor)
+        registry, taskloop, hands = (ns["registry"], ns["taskloop"],
+                                     ns["hands"])
+        sched = ns["sched"]
+
+        def read_pairs():
+            return list(collect_links(hands.page))
+
+        def read_controls():
+            return list(collect_controls(hands.page))
+
+        def read_clicks():
+            return list(collect_clicks(hands.page))
+
+        def execute(item, legs, from_leg):
+            total = len(legs)
+            task_id = item.get("task_id")
+            task = None
+            if task_id:
+                try:
+                    task = registry.get(task_id)
+                except Exception:
+                    task = None
+            if task is None:
+                task = registry.add(Task.create(
+                    f"Chain of {total} legs",
+                    allowed_tools=["browser"],
+                    allowed_domains=opts["allow_domains"] or ["file:"],
+                    allowed_paths=[]))
+                task_id = task.task_id
+            try:
+                registry.checkout(task_id, "cli")
+            except Exception as exc:
+                return {"outcome": "DEFERRED", "task_id": task_id,
+                        "detail": f"cannot take ownership ({exc})"}
+            try:
+                task = registry.refresh(task_id)
+            except Exception as exc:
+                return {"outcome": "DEFERRED", "task_id": task_id,
+                        "detail": f"cannot refresh task state ({exc})"}
+            if task.status in TERMINAL:
+                # Death between task settlement and queue settlement:
+                # adopt the terminal outcome, never re-execute.
+                mapping = {"COMPLETED": "COMPLETED",
+                           "CANCELLED": "CANCELLED",
+                           "FAILED": "FAILED"}
+                return {"outcome": mapping[str(task.status.value)],
+                        "task_id": task_id,
+                        "detail": "task already terminal"}
+            try:
+                sched.enqueue(task_id)
+                steps, _ = task_store.get_usage(db, task_id)
+                if steps:
+                    sched._steps_used[task_id] = steps
+            except Exception:
+                pass
+            if str(task.status.value) == "PAUSED":
+                try:
+                    sched.resume(task_id)
+                    task = registry.get(task_id)
+                except Exception as exc:
+                    return {"outcome": "DEFERRED", "task_id": task_id,
+                            "detail": f"cannot resume paused ({exc})"}
+            for pid in plan_store.plans_for_task(db, task_id):
+                try:
+                    plan, _, _ = plan_store.load_plan(db, pid)
+                except Exception:
+                    continue
+                if plan.status not in PLAN_LIVE:
+                    continue
+                try:
+                    plan_store.set_plan_status(db, pid, "SUPERSEDED")
+                except Exception:
+                    continue
+                ns["audit"].log("PLAN_SUPERSEDED", task_id,
+                               {"old_plan": pid, "new_plan": "-",
+                                "at_step": 0, "snapshot_chars": 0})
+            if not item.get("task_id"):
+                try:
+                    work_queue.bind_task(db, item["work_id"], owner,
+                                         task_id)
+                except WorkRefused as exc:
+                    return {"outcome": "DEFERRED", "task_id": task_id,
+                            "detail": f"cannot bind task ({exc})"}
+            try:
+                decider = pick_decider(argv, ns["approvals"], task_id)
+            except UsageError as exc:
+                return {"outcome": "DEFERRED", "task_id": task_id,
+                        "detail": f"usage error: {exc}"}
+            res = run_chain(taskloop, db, hands.open, read_pairs,
+                            read_controls, task, {"legs": legs},
+                            decider, from_leg=from_leg,
+                            read_clicks=read_clicks)
+            final = registry.get(task_id).status.value
+            mapping = {"COMPLETED": "COMPLETED",
+                       "CANCELLED": "CANCELLED", "FAILED": "FAILED"}
+            return {"outcome": mapping.get(final, "DEFERRED"),
+                    "task_id": task_id,
+                    "detail": f"leg chain {res.status}: {res.detail}"}
+
+        try:
+            summary = serve(db, owner, execute, once=once,
+                            max_items=max_items)
+        except WorkRefused as exc:
+            print(f"usage error: {exc}")
+            return 1
+        except Exception as exc:
+            print(f"error: {exc}")
+            return 1
+        print(f"daemon: {owner} processed={summary['processed']}"
+              f" settled={summary['settled']}"
+              f" deferred={summary['deferred']}"
+              + (" stopped=interrupted"
+                 if summary.get("stopped") else " drained"))
+        if summary.get("stopped") or summary["deferred"]:
+            return 1
+        return 0
+    except Exception as exc:
+        print(f"error: {exc}")
+        return 1
+    finally:
+        try:
+            sessions.close()
+        except Exception:
+            pass
+        try:
+            if db is not None:
+                db.close()
+        except Exception:
+            pass
+
+
 def run_visibility(opts: dict) -> int:
     """Read-only task visibility (slice-39). No browser, no writes,
     no deciders: --list/--status never mix with execution flags."""
@@ -963,7 +1484,8 @@ def run_visibility(opts: dict) -> int:
         return 1
     for flag in ("road", "url", "text", "expect", "max_items",
                  "max_iters", "slots_json", "submit", "goal", "resume",
-                 "query", "chain_file", "from_leg"):
+                 "query", "chain_file", "from_leg", "decompose",
+                 "daemon", "once"):
         if opts.get(flag) is not None:
             print(f"usage error: --list/--status take no"
                   f" --{flag.replace('_', '-')}")
@@ -999,7 +1521,8 @@ def run_goal(argv, opts, audit_path, profile_dir, shots_dir,
         return 1
     for flag in ("road", "url", "text", "expect", "max_items",
                  "max_iters", "slots_json", "submit", "query",
-                 "chain_file", "from_leg"):
+                 "chain_file", "from_leg", "decompose",
+                 "daemon", "once"):
         if opts.get(flag) is not None:
             print(f"usage error: --goal takes no"
                   f" --{flag.replace('_', '-')}")
@@ -1105,21 +1628,36 @@ def main(argv: list[str]) -> int:
     audit_path = Path(opts.get("audit") or (ROOT / "var" / "audit-do.jsonl"))
     profile_dir = Path(opts.get("profile_dir") or (ROOT / "var" / "do-profile"))
     shots_dir = Path(opts.get("shots_dir") or (ROOT / "var" / "do-shots"))
+    if opts.get("resume") and opts.get("chain_file") is not None:
+        return run_chain_resume(argv, opts, audit_path, profile_dir,
+                                shots_dir, monitor)
     if opts.get("resume"):
         return run_resume(argv, opts, audit_path, profile_dir, shots_dir,
                           monitor)
-    if opts.get("chain_file") is not None or opts.get("from_leg") is not None:
+    if opts.get("chain_file") is not None or (
+            opts.get("from_leg") is not None
+            and opts.get("decompose") is None):
         if opts.get("chain_file") is None:
-            print("usage error: --from-leg needs --chain-file")
+            print("usage error: --from-leg needs --chain-file"
+                  " or --decompose")
             return 1
         return run_chain_file(argv, opts, audit_path, profile_dir,
                               shots_dir, monitor)
-    if opts.get("chain_file") is not None or opts.get("from_leg") is not None:
+    if opts.get("chain_file") is not None or (
+            opts.get("from_leg") is not None
+            and opts.get("decompose") is None):
         if opts.get("chain_file") is None:
-            print("usage error: --from-leg needs --chain-file")
+            print("usage error: --from-leg needs --chain-file"
+                  " or --decompose")
             return 1
         return run_chain_file(argv, opts, audit_path, profile_dir,
                               shots_dir, monitor)
+    if opts.get("decompose") is not None:
+        return run_decompose(argv, opts, audit_path, profile_dir,
+                             shots_dir, monitor)
+    if opts.get("daemon") or opts.get("once"):
+        return run_daemon(argv, opts, audit_path, profile_dir,
+                          shots_dir, monitor)
     if opts.get("goal") is not None:
         return run_goal(argv, opts, audit_path, profile_dir,
                         shots_dir, monitor)
