@@ -1,0 +1,16 @@
+<html><head><title>Receipt Desk — Demo Portal</title></head>
+<body>
+<h1>Receipt desk</h1>
+<label for="f-receipt">Expense receipt</label>
+<input type="file" id="f-receipt">
+<span id="upload-status">nothing uploaded</span>
+<script>
+document.getElementById('f-receipt').addEventListener('change',
+  function () {
+    var f = this.files[0];
+    document.getElementById('upload-status').textContent =
+      f ? ('received ' + f.name + ' (' + f.size + ' bytes)')
+        : 'nothing uploaded';
+  });
+</script>
+</body></html>

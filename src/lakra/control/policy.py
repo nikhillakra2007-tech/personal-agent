@@ -21,8 +21,13 @@ BLOCK: Verdict = "BLOCK"
 
 # Action kinds whose *effect class* is always consequential (L3), regardless
 # of what the caller claims in Action.effect.
+# V2-05: browser.download and browser.upload join browser.submit here —
+# file transfers are consequential and park unconditionally (ASK), with
+# the identical one-shot approval-token path. No other rule moves.
 L3_KINDS = frozenset({
     "browser.submit",
+    "browser.download",
+    "browser.upload",
     "mail.send",
     "message.send",
     "publish",

@@ -55,11 +55,15 @@ def _selector_of(action: Action) -> str:
 
 class BrowserController:
     def __init__(self, router, actions, audit, scheduler=None,
-                 observer=None, snapshots=None) -> None:
+                 observer=None, snapshots=None,
+                 transfer_root=None) -> None:
         self.router = router
         self.actions = actions
         self.audit = audit
         self.scheduler = scheduler
+        # V2-05: sandbox root for file_nonempty predicates (download
+        # proof). None keeps every file predicate fail-closed.
+        self.transfer_root = transfer_root
         # Optional observer share: after a navigate step succeeds through
         # the observer, attach its live page so subsequent act/verify steps
         # see the same page. (Slice-05 direction: the controller wraps both.)
@@ -159,7 +163,8 @@ class BrowserController:
                 previous=None) -> bool:
         from .verification import MissingBaselineError
         try:
-            passed = check(step.expect, self.actions.page, previous)
+            passed = check(step.expect, self.actions.page, previous,
+                           transfer_root=self.transfer_root)
         except MissingBaselineError:
             self.audit.log("VERIFICATION", task_id,
                            {"kind": step.expect.kind,

@@ -170,22 +170,31 @@ def test_unmaterializable_settles_failed(tmp_path):
 def test_stale_recovered_before_fresh_and_live_held(tmp_path):
     db = db_at(tmp_path)
     try:
-        fresh = queued(db)
-        stale = queued(db)
+        first = queued(db)
+        second = queued(db)
+        # claim_next takes the oldest QUEUED item, i.e. `first`, and
+        # holds it live under a long lease.
         wq.claim_next(db, "dead", ttl_s=3600)
-        # Reorder: make the stale item older is unnecessary; reclaim
-        # path is checked first regardless of FIFO position.
+        order = []
+
+        def _fn(item, legs, fl):
+            order.append(item["work_id"])
+            return {"outcome": "COMPLETED", "task_id": "t",
+                    "detail": ""}
+        # A live claim is never stolen: only still-queued work runs.
+        out = serve(db, "w", _fn, max_items=1)
+        assert out["processed"] == 1 and order == [second["work_id"]]
+        assert wq.get(db, first["work_id"])["owner"] == "dead"
+        assert wq.reclaim_stale(db, "thief") is None
+        # Once the lease expires the stale claim recovers before any
+        # fresh FIFO claim.
+        third = queued(db)
         db.execute("UPDATE work_items SET lease_until=1 WHERE"
                    " state='CLAIMED'")
         db.commit()
-        order = []
-        out = serve(db, "w", lambda item, legs, fl:
-                    order.append(item["work_id"]) or
-                    {"outcome": "COMPLETED", "task_id": "t",
-                     "detail": ""}, max_items=2)
+        out = serve(db, "w", _fn, max_items=2)
         assert out["processed"] == 2
-        assert order[0] == stale["work_id"]  # recovery first
-        assert order[1] == fresh["work_id"]
+        assert order[1:] == [first["work_id"], third["work_id"]]
     finally:
         db.close()
 

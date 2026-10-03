@@ -41,7 +41,8 @@ def test_all_predicates_false(page):
 def test_predicate_set_matches_contract():
     assert PREDICATES == {"element_exists", "element_visible",
                           "element_checked", "element_unchecked",
-                          "text_contains", "url_is", "url_contains"}
+                          "text_contains", "url_is", "url_contains",
+                          "file_nonempty"}
 
 
 def test_checked_predicates_follow_state(page):

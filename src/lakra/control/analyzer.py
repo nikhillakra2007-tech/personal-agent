@@ -259,7 +259,9 @@ def ground_fields(goal_slots: dict, controls) -> list:
 
     goal_slots: {slot_name: {"text"|"checked"|"select"} value}.
     controls: iterable of (label, kind, selector) — the snapshot
-    inventory shape (kind: text|check|select).
+    inventory shape (kind: text|check|select|file; V2-05 file entries
+    validate here but never match a fill slot — only the upload road
+    grounds them, and values never travel from page to plan).
     Matching is strict per slot: candidates are controls of the
     matching kind (text->text, checked->check, select->select); the
     winner is the unique control with top slot-word/label-word
@@ -280,7 +282,7 @@ def ground_fields(goal_slots: dict, controls) -> list:
         raise UnknownGoalError("empty controls: nothing to ground in")
     for label, kind, selector in items:
         if (not isinstance(label, str) or not label.strip()
-                or kind not in ("text", "check", "select")
+                or kind not in ("text", "check", "select", "file")
                 or not isinstance(selector, str)
                 or not selector.startswith("#")):
             raise UnknownGoalError("malformed controls: bad entry")
@@ -322,6 +324,53 @@ def ground_fields(goal_slots: dict, controls) -> list:
         _label, selector = winners[0]
         fields.append(_entry_for(slot, value, selector))
     return fields
+
+
+def ground_upload(phrase: str, controls) -> str:
+    """Ground an upload-input phrase to one observed file input.
+
+    V2-05: binds the caller-stated input label ("Expense receipt")
+    against the observed control inventory, considering ONLY file-kind
+    entries (text/check/select controls can never satisfy an upload —
+    their labels do not even score). Returns the winning #id
+    selector. Refuses (UnknownGoalError, never a guess):
+    empty/malformed inventory, no file input observed, zero overlap,
+    tied winners, or non-file/ill-formed entries. Pure function.
+    """
+    lowered = _check_goal(phrase)
+    try:
+        items = [(label, kind, selector) for label, kind, selector
+                 in controls]
+    except (TypeError, ValueError) as exc:
+        raise UnknownGoalError(f"malformed controls: {exc}")
+    if not items:
+        raise UnknownGoalError("empty controls: nothing to ground in")
+    for label, kind, selector in items:
+        if (not isinstance(label, str) or not label.strip()
+                or kind not in ("text", "check", "select", "file")
+                or not isinstance(selector, str)
+                or not selector.startswith("#")):
+            raise UnknownGoalError("malformed controls: bad entry")
+    phrase_words = set(_content_words(lowered))
+    if not phrase_words:
+        raise UnknownGoalError("phrase carries no groundable words")
+    files = [(label, sel) for label, kind, sel in items
+             if kind == "file"]
+    if not files:
+        raise UnknownGoalError(
+            "no file input observed: nothing to ground in")
+    scored = [(len(phrase_words & set(_content_words(label))), label,
+               selector) for label, selector in files]
+    best = max(s for s, _, _ in scored)
+    if best < 1:
+        raise UnknownGoalError("no file input overlaps the phrase")
+    winners = sorted((label, sel) for s, label, sel in scored
+                     if s == best)
+    if len(winners) > 1:
+        raise UnknownGoalError(
+            f"ambiguous file input {[l for l, _ in winners]}:"
+            " refuse, never guess")
+    return winners[0][1]
 
 
 def ground_submit(phrase: str, submits) -> str:

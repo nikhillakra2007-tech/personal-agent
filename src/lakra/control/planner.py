@@ -59,7 +59,12 @@ class UnknownGoalError(ValueError):
 # (word-boundary match, so "secretary" passes and "my password" does not).
 HINT_KEYS = frozenset({"url", "expect_text", "selector", "text",
                        "submit_selector", "achieved", "fields",
-                       "link_text"})
+                       "link_text", "table_text", "dest_path",
+                       "src_path"})
+# "table_text" (V2-04) rides table-road plans so persisted hints name
+# the grounded description (chain status labels the road honestly);
+# "dest_path"/"src_path" (V2-05) do the same for transfer roads.
+# The generic non-empty/capped/secret-shaped gate below covers all.
 HINT_VALUE_CAP = 2000
 SECRET_WORDS = frozenset({"password", "passwd", "secret", "api_key",
                           "apikey"})

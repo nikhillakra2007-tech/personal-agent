@@ -495,6 +495,423 @@ def run_click_task(taskloop: TaskLoop, open_page, read_clicks,
     return taskloop.run_goal(task, hints, decider)
 
 
+# -- composed entry (V2-04, grounded-table road only) ---------------------
+
+def run_table_task(taskloop: TaskLoop, open_page, read_tables,
+                   task, goal: dict, decider):
+    """Goal -> observe -> ground -> extract -> verify -> run_plan.
+
+    goal = {"table_url", "table_text", "expect_text"}.
+    open_page(table_url) and read_tables() -> [((total, rows), ...)]
+    are caller-provided browser seams (same precedent as inventory_fn
+    and Runner.observe — control never touches browser internals).
+    Grounding binds the caller-stated table_text to one observed
+    table via the deterministic ground_table() (unique winner; table
+    located by inventory position, never by invented CSS); extraction
+    renders that table read-only to headers/rows (order, empties, and
+    shape preserved; the page is never mutated, no page.evaluate);
+    verification confirms the caller-stated expect_text INSIDE the
+    extracted cells (never "a table exists"). Credential-shaped
+    descriptions, expectations, or extracted content refuse outright
+    (existing credential-safety contract: never recorded, never
+    transmitted, no findings attached).
+
+    Execution is a directly-built navigate + snapshot plan (the
+    LoopRunner._establish precedent: built inline so the task goal's
+    own keywords can never route it elsewhere, and so no planner,
+    analyzer, or template moves) through TaskLoop.run_plan (policy,
+    guards, per-step verification, persistence, existing audit
+    taxonomy — both steps are L0 read-only, so no approval ever
+    parks). Refusals at any pre-plan stage return STOPPED
+    RunResult(plan_id="-", steps_done=0) with a single PLAN_OUTCOME
+    audit entry (the TaskLoop.run_goal refusal shape) and touch
+    nothing else. On DONE the extracted table rides findings (one
+    JSON-serializable dict) with a one-line detail summary; every
+    other outcome passes through untouched with no findings.
+    """
+    from .runner import RunResult
+    from .tables import (extract_table, ground_table, table_holds_secret,
+                         verify_expected)
+    from .planner import UnknownGoalError
+    audit = taskloop.runner.audit
+
+    def refuse(detail: str) -> RunResult:
+        audit.log("PLAN_OUTCOME", task.task_id,
+                  {"plan_id": "-", "status": "STOPPED",
+                   "steps_done": 0, "detail": detail})
+        return RunResult(plan_id="-", status="STOPPED", steps_done=0,
+                         detail=detail)
+
+    if not isinstance(goal, dict):
+        return refuse("malformed goal: not a mapping")
+    missing = [k for k in ("table_url", "table_text", "expect_text")
+               if k not in goal]
+    if missing:
+        return refuse(f"malformed goal: missing {missing}")
+    if read_tables is None:
+        return refuse("inventory unavailable: no table inventory seam")
+    url, desc, expect = (goal["table_url"], goal["table_text"],
+                        goal["expect_text"])
+    for name, value in (("table_url", url), ("table_text", desc),
+                        ("expect_text", expect)):
+        if not isinstance(value, str) or not value.strip():
+            return refuse(f"malformed goal: {name} must be a non-empty"
+                          " string")
+    try:
+        open_page(url)
+    except Exception as exc:
+        return refuse(f"cannot open page ({exc})")
+    try:
+        inventory = list(read_tables() or [])
+    except Exception as exc:
+        return refuse(f"inventory failed ({exc})")
+    try:
+        index = ground_table(desc, inventory)
+    except UnknownGoalError as exc:
+        return refuse(f"no groundable table ({exc})")
+    try:
+        extracted = extract_table(inventory, index)
+    except UnknownGoalError as exc:
+        return refuse(f"cannot extract table ({exc})")
+    if table_holds_secret(extracted):
+        return refuse("credential-shaped table content: refused")
+    try:
+        verify_expected(extracted, expect)
+    except UnknownGoalError as exc:
+        return refuse(f"unverified table ({exc})")
+    from .planner import Plan, PlannedStep
+    from .policy import Action
+    from ..execution.browser.verification import Predicate
+    steps = [
+        PlannedStep(
+            action=Action(kind="browser.navigate", target=url,
+                          effect="reversible", task_id=task.task_id),
+            expect=Predicate(kind="url_is", target=url),
+            max_retries=2,
+            rationale=f"open {url} so observation starts from a known"
+                      " page"),
+        PlannedStep(
+            action=Action(kind="browser.snapshot", target=url,
+                          effect="read", task_id=task.task_id),
+            expect=Predicate(kind="text_contains", target=expect.strip()),
+            max_retries=1,
+            rationale=f"read the page and confirm it mentions"
+                      f" {expect.strip()!r}"),
+    ]
+    plan = Plan(plan_id=uuid4().hex, task_id=task.task_id,
+                goal=task.goal, steps=steps, created_at=_now())
+    hints = {"url": url, "expect_text": expect.strip(),
+             "table_text": desc.strip()}
+    res = taskloop.run_plan(plan, hints, decider)
+    if res.status != "DONE":
+        return res
+    shape = extracted["shape"]
+    done = RunResult(plan_id=res.plan_id, status=res.status,
+                     steps_done=res.steps_done,
+                     detail=f"table {index + 1}/{extracted['total_tables']}:"
+                            f" {shape[0]} rows x {shape[1]} cols;"
+                            f" expected {expect.strip()!r} verified")
+    done.findings = [extracted]  # RunResult carries no findings field;
+    # the CLI reads this attribute for the JSON output line (the same
+    # getattr finish() already uses); non-DONE outcomes carry none.
+    return done
+
+
+# -- composed entry (V2-05, download road only) ---------------------------
+
+def _transfer_confine(target: str, root):
+    """Sandbox-relative path -> absolute Path, or None on any escape.
+    Same realpath-prefix contract as the executors (absolute-outside,
+    ../, and symlink escapes all refuse); pure path math, no writes."""
+    import os
+    from pathlib import Path as _Path
+    if root is None:
+        return None
+    try:
+        root_real = os.path.realpath(root)
+    except Exception:
+        return None
+    if os.path.isabs(target):
+        full = os.path.realpath(target)
+    else:
+        full = os.path.realpath(os.path.join(root_real, target))
+    if full != root_real and not full.startswith(root_real + os.sep):
+        return None
+    return _Path(full)
+
+
+def _secret_basename(path: str) -> bool:
+    """True when the file name itself is secret-shaped (filenames are
+    not prose: any SECRET_WORD substring of the lowercased basename
+    refuses — a "secretary.txt" false refusal beats an exposure)."""
+    import os as _os
+    from .planner import SECRET_WORDS as _SECRETS
+    base = _os.path.basename(path).lower()
+    return any(w in base for w in _SECRETS)
+
+
+def run_download_task(taskloop: TaskLoop, open_page, read_links,
+                      task, goal: dict, decider, transfer_root=None):
+    """Goal -> observe -> ground -> L3 download -> verify -> run_plan.
+
+    goal = {"download_url", "download_text", "dest_path",
+    "expect_text"} (expect_text: page proof shown after the transfer).
+    open_page(download_url) and read_links() -> [(text, href)] are
+    caller-provided browser seams; transfer_root is the sandbox the
+    dest must already confine to (road-level pre-plan refusal, so an
+    invalid destination never reaches an approval, let alone an
+    execution). Grounding binds download_text to one observed link
+    via the existing deterministic ground_link() (unique winner; the
+    trigger clicks through the executor's text rung); an existing
+    dest refuses (no silent overwrite — including on recovery after
+    a post-save crash: the operator clears or re-queues with a fresh
+    dest instead of the road guessing which file won).
+
+    Execution is a directly-built navigate + snapshot + download +
+    snapshot plan (the LoopRunner._establish precedent: no planner,
+    analyzer, or template moves) through TaskLoop.run_plan — policy
+    (browser.download is L3: park, one-shot token, execute once),
+    guards, per-step verification, persistence, existing audit
+    taxonomy. Like every L3 gate, the approval itself stands in for
+    the gate predicate; the transfer itself is proven by the
+    executor's post-conditions (saved, confined, size-bounded —
+    executor failure never reads DONE) and the closing snapshot. The
+    gate step never retries (submit-gate precedent). Refusals at any
+    pre-plan stage return STOPPED
+    RunResult(plan_id="-", steps_done=0) with a single PLAN_OUTCOME
+    audit entry and touch nothing else. On DONE the transfer summary
+    rides findings; every other outcome (incl. human deny at the
+    gate) passes through untouched with no findings.
+    """
+    from .planner import Plan, PlannedStep, validate_hints
+    from .policy import Action
+    from .runner import RunResult
+    from ..execution.browser.verification import Predicate
+    audit = taskloop.runner.audit
+
+    def refuse(detail: str) -> RunResult:
+        audit.log("PLAN_OUTCOME", task.task_id,
+                  {"plan_id": "-", "status": "STOPPED",
+                   "steps_done": 0, "detail": detail})
+        return RunResult(plan_id="-", status="STOPPED", steps_done=0,
+                         detail=detail)
+
+    if not isinstance(goal, dict):
+        return refuse("malformed goal: not a mapping")
+    missing = [k for k in ("download_url", "download_text", "dest_path",
+                           "expect_text") if k not in goal]
+    if missing:
+        return refuse(f"malformed goal: missing {missing}")
+    url, text, dest, expect = (goal["download_url"],
+                               goal["download_text"], goal["dest_path"],
+                               goal["expect_text"])
+    try:
+        hints = validate_hints({"url": url, "expect_text": expect,
+                                "dest_path": dest})
+    except Exception as exc:
+        return refuse(f"malformed goal ({exc})")
+    url, expect, dest = (hints["url"], hints["expect_text"].strip(),
+                         hints["dest_path"].strip())
+    if _transfer_confine(dest, transfer_root) is None:
+        return refuse(f"invalid destination {dest!r}: outside the"
+                      " transfer sandbox")
+    if not _transfer_confine(dest, transfer_root).name:
+        return refuse("invalid destination: must name a file")
+    if _transfer_confine(dest, transfer_root).exists():
+        return refuse(f"invalid destination {dest!r}: already exists"
+                      " (no silent overwrite)")
+    try:
+        open_page(url)
+    except Exception as exc:
+        return refuse(f"cannot open page ({exc})")
+    try:
+        inventory = list(read_links() or [])
+    except Exception as exc:
+        return refuse(f"inventory failed ({exc})")
+    from .analyzer import UnknownGoalError, ground_link
+    try:
+        trigger = ground_link(text, inventory)
+    except UnknownGoalError as exc:
+        return refuse(f"no groundable download trigger ({exc})")
+    steps = [
+        PlannedStep(
+            action=Action(kind="browser.navigate", target=url,
+                          effect="reversible", task_id=task.task_id),
+            expect=Predicate(kind="url_is", target=url),
+            max_retries=2,
+            rationale=f"open {url} so observation starts from a known"
+                      " page"),
+        PlannedStep(
+            action=Action(kind="browser.snapshot", target=url,
+                          effect="read", task_id=task.task_id),
+            expect=Predicate(kind="text_contains", target=trigger),
+            max_retries=1,
+            rationale=f"confirm the page offers {trigger!r} before"
+                      " downloading"),
+        PlannedStep(
+            action=Action(kind="browser.download",
+                          target=f"{trigger}\n---\n{dest}",
+                          effect="consequential", task_id=task.task_id),
+            expect=Predicate(kind="file_nonempty", target=dest),
+            max_retries=0,
+            rationale=f"download {trigger!r} to {dest} (L3 gate: parks"
+                      " for a human, executes once)"),
+        PlannedStep(
+            action=Action(kind="browser.snapshot", target=url,
+                          effect="read", task_id=task.task_id),
+            expect=Predicate(kind="text_contains", target=expect),
+            max_retries=1,
+            rationale=f"record the page mentioning {expect!r} after"
+                      " the transfer"),
+    ]
+    plan = Plan(plan_id=uuid4().hex, task_id=task.task_id,
+                goal=task.goal, steps=steps, created_at=_now())
+    hints = {"url": url, "expect_text": expect, "dest_path": dest}
+    res = taskloop.run_plan(plan, hints, decider)
+    if res.status != "DONE":
+        return res
+    try:
+        size = _transfer_confine(dest, transfer_root).stat().st_size
+    except OSError:
+        size = -1
+    done = RunResult(plan_id=res.plan_id, status=res.status,
+                     steps_done=res.steps_done,
+                     detail=f"downloaded {dest} ({size} bytes)")
+    done.findings = [{"dest_path": dest, "bytes": size}]
+    return done
+
+
+# -- composed entry (V2-05, upload road only) -----------------------------
+
+def run_upload_task(taskloop: TaskLoop, open_page, read_controls,
+                    task, goal: dict, decider, transfer_root=None):
+    """Goal -> observe -> ground -> L3 upload -> verify -> run_plan.
+
+    goal = {"upload_url", "upload_text", "src_path", "expect_text"}
+    (expect_text: page proof of acceptance, e.g. the shown file
+    name). open_page(upload_url) and read_controls() ->
+    [(label, kind, selector)] are caller-provided browser seams;
+    transfer_root is the sandbox the source must already live in as
+    a regular size-bounded file (road-level pre-plan refusal, so a
+    bad source never reaches an approval). Grounding binds
+    upload_text to one observed file input via ground_upload()
+    (unique winner, #id only; ambiguous inputs refuse); the source
+    basename must not be secret-shaped (refuse rather than
+    transmit credentials).
+
+    Execution is a directly-built navigate + snapshot + upload +
+    snapshot plan through TaskLoop.run_plan — same L3/token/guard/
+    verification/audit contract as the download road (the gate step
+    never retries; like every L3 gate, the approval itself stands in
+    for the gate predicate, so page acceptance is verified by the
+    CLOSING snapshot on fresh state — never set_input_files()
+    success alone). Refusal and findings conventions mirror
+    run_download_task.
+    """
+    from .planner import Plan, PlannedStep, validate_hints
+    from .policy import Action
+    from .runner import RunResult
+    from ..execution.browser.verification import Predicate
+    audit = taskloop.runner.audit
+
+    def refuse(detail: str) -> RunResult:
+        audit.log("PLAN_OUTCOME", task.task_id,
+                  {"plan_id": "-", "status": "STOPPED",
+                   "steps_done": 0, "detail": detail})
+        return RunResult(plan_id="-", status="STOPPED", steps_done=0,
+                         detail=detail)
+
+    if not isinstance(goal, dict):
+        return refuse("malformed goal: not a mapping")
+    missing = [k for k in ("upload_url", "upload_text", "src_path",
+                           "expect_text") if k not in goal]
+    if missing:
+        return refuse(f"malformed goal: missing {missing}")
+    url, label, src, expect = (goal["upload_url"], goal["upload_text"],
+                               goal["src_path"], goal["expect_text"])
+    try:
+        hints = validate_hints({"url": url, "expect_text": expect,
+                                "src_path": src})
+    except Exception as exc:
+        return refuse(f"malformed goal ({exc})")
+    url, expect, src = (hints["url"], hints["expect_text"].strip(),
+                        hints["src_path"].strip())
+    confined = _transfer_confine(src, transfer_root)
+    if confined is None:
+        return refuse(f"invalid source {src!r}: outside the transfer"
+                      " sandbox")
+    try:
+        is_file = confined.is_file()
+        size = confined.stat().st_size if is_file else -1
+    except OSError as exc:
+        return refuse(f"unreadable source ({exc})")
+    if not is_file:
+        return refuse(f"invalid source {src!r}: not an uploadable file")
+    from ..execution.browser.actions import MAX_TRANSFER_BYTES
+    if size > MAX_TRANSFER_BYTES:
+        return refuse(f"invalid source {src!r}: size {size} exceeds"
+                      f" {MAX_TRANSFER_BYTES}")
+    if _secret_basename(src):
+        return refuse(f"invalid source {src!r}: secret-shaped file"
+                      " name refused")
+    try:
+        open_page(url)
+    except Exception as exc:
+        return refuse(f"cannot open page ({exc})")
+    try:
+        controls = list(read_controls() or [])
+    except Exception as exc:
+        return refuse(f"controls failed ({exc})")
+    from .analyzer import UnknownGoalError, ground_upload
+    try:
+        selector = ground_upload(label, controls)
+    except UnknownGoalError as exc:
+        return refuse(f"no groundable file input ({exc})")
+    steps = [
+        PlannedStep(
+            action=Action(kind="browser.navigate", target=url,
+                          effect="reversible", task_id=task.task_id),
+            expect=Predicate(kind="url_is", target=url),
+            max_retries=2,
+            rationale=f"open {url} so observation starts from a known"
+                      " page"),
+        PlannedStep(
+            action=Action(kind="browser.snapshot", target=url,
+                          effect="read", task_id=task.task_id),
+            expect=Predicate(kind="text_contains", target=label.strip()),
+            max_retries=1,
+            rationale=f"confirm the page offers {label.strip()!r}"
+                      " before uploading"),
+        PlannedStep(
+            action=Action(kind="browser.upload",
+                          target=f"{selector}\n---\n{src}",
+                          effect="consequential", task_id=task.task_id),
+            expect=Predicate(kind="element_exists", target=selector),
+            max_retries=0,
+            rationale=f"upload {src} into {selector} (L3 gate: parks"
+                      " for a human, executes once)"),
+        PlannedStep(
+            action=Action(kind="browser.snapshot", target=url,
+                          effect="read", task_id=task.task_id),
+            expect=Predicate(kind="text_contains", target=expect),
+            max_retries=1,
+            rationale=f"confirm the page shows {expect!r}: the upload"
+                      " was accepted"),
+    ]
+    plan = Plan(plan_id=uuid4().hex, task_id=task.task_id,
+                goal=task.goal, steps=steps, created_at=_now())
+    hints = {"url": url, "expect_text": expect, "src_path": src}
+    res = taskloop.run_plan(plan, hints, decider)
+    if res.status != "DONE":
+        return res
+    done = RunResult(plan_id=res.plan_id, status=res.status,
+                     steps_done=res.steps_done,
+                     detail=f"uploaded {src} into {selector}:"
+                            f" {expect!r} verified")
+    done.findings = [{"src_path": src, "selector": selector}]
+    return done
+
+
 # -- composed entry (slice-43, observe road only) ---------------------------
 
 def run_observe_task(taskloop: TaskLoop, task, goal: dict, decider):
@@ -725,13 +1142,18 @@ LINK_KEYS = ("list_url", "goal_text", "body_expect",
              "max_items", "max_iters")
 FORM_KEYS = ("form_url", "goal_slots", "submit_selector")
 CLICK_KEYS = ("click_url", "click_text", "expect_text")
+TABLE_KEYS = ("table_url", "table_text", "expect_text")
+DOWNLOAD_KEYS = ("download_url", "download_text", "dest_path",
+                 "expect_text")
+UPLOAD_KEYS = ("upload_url", "upload_text", "src_path", "expect_text")
 OBSERVE_KEYS = ("url", "expect_text")
 SEARCH_KEYS = ("search_url", "query", "submit_selector", "expect_text",
                 "submit_phrase")
 
 
 def run_task(taskloop: TaskLoop, store, open_page, read_links,
-             read_controls, task, goal: dict, decider, read_clicks=None):
+             read_controls, task, goal: dict, decider, read_clicks=None,
+             read_tables=None, transfer_root=None):
     """Route one union goal to exactly one composed road (slice-35).
 
     Routing is key presence only, fixed precedence, never probed and
@@ -741,6 +1163,12 @@ def run_task(taskloop: TaskLoop, store, open_page, read_links,
       max_items/max_iters present (and no form keys) -> run_linked_task;
       click_url/click_text present (and no other road keys)
         -> run_click_task;
+      table_url/table_text present (and no other road keys)
+        -> run_table_task;
+      download_url/download_text present (and no other road keys)
+        -> run_download_task;
+      upload_url/upload_text present (and no other road keys)
+        -> run_upload_task;
       list_url/goal_text/body_expect only -> run_follow_task;
       url/expect_text only -> run_observe_task;
       search_url/query/submit_selector/expect_text only
@@ -754,7 +1182,9 @@ def run_task(taskloop: TaskLoop, store, open_page, read_links,
     identical to calling that road directly. read_links/read_controls
     are passed through untouched and must satisfy the chosen road's
     own seam contract (pairs for follow, texts for loop, controls
-    for form, label/ref pairs for click). A refused road is never
+    for form, label/ref pairs for click, pairs for download, controls
+    for upload); transfer roads additionally need transfer_root, the
+    sandbox their paths confine to. A refused road is never
     retried on another road (no fall-through). Dispatcher-level
     refusals return STOPPED RunResult(plan_id="-", steps_done=0) with
     a single PLAN_OUTCOME audit entry; road results (RunResult or
@@ -782,10 +1212,16 @@ def run_task(taskloop: TaskLoop, store, open_page, read_links,
     has_observe = "url" in goal or "expect_text" in goal
     has_search = ("search_url" in goal or "query" in goal)
     has_click = "click_url" in goal or "click_text" in goal
+    has_table = "table_url" in goal or "table_text" in goal
+    has_download = "download_url" in goal or "download_text" in goal \
+        or "dest_path" in goal
+    has_upload = "upload_url" in goal or "upload_text" in goal \
+        or "src_path" in goal
     # submit_selector/expect_text are native to the search shape too,
     # so only foreign indicators count here (slice-44).
     if has_search and (("goal_slots" in goal) or ("form_url" in goal)
                        or has_loop or has_link or has_click
+                       or has_table or has_download or has_upload
                        or ("url" in goal)):
         return refuse("mixed road keys: search keys cannot combine with"
                       " other road keys")
@@ -802,6 +1238,7 @@ def run_task(taskloop: TaskLoop, store, open_page, read_links,
     # misroute). Only "url" counts as foreign observe evidence;
     # expect_text alone is native to the click shape.
     if has_click and (has_form or has_loop or has_link or has_search
+                      or has_table or has_download or has_upload
                       or has_form_addr or ("url" in goal)):
         return refuse("mixed road keys: click keys cannot combine with"
                       " other road keys")
@@ -809,6 +1246,47 @@ def run_task(taskloop: TaskLoop, store, open_page, read_links,
         sub = {k: goal[k] for k in CLICK_KEYS if k in goal}
         return run_click_task(taskloop, open_page, read_clicks,
                               task, sub, decider)
+    # Table branch (V2-04 table road): routed before the observe
+    # branch because expect_text is native here but would otherwise
+    # satisfy has_observe and drop the table description (the Slice-48
+    # misroute pattern). Only "url" counts as foreign observe
+    # evidence; expect_text alone is native to the table shape.
+    if has_table and (has_form or has_loop or has_link or has_search
+                      or has_click or has_download or has_upload
+                      or has_form_addr or ("url" in goal)):
+        return refuse("mixed road keys: table keys cannot combine with"
+                      " other road keys")
+    if has_table:
+        sub = {k: goal[k] for k in TABLE_KEYS if k in goal}
+        return run_table_task(taskloop, open_page, read_tables,
+                              task, sub, decider)
+    # Download branch (V2-05 download road): routed before the observe
+    # branch because expect_text is native here but would otherwise
+    # satisfy has_observe and drop the download description (the
+    # Slice-48 misroute pattern). Only "url" counts as foreign
+    # observe evidence; expect_text alone is native to the shape.
+    if has_download and (has_form or has_loop or has_link or has_search
+                         or has_click or has_table or has_upload
+                         or has_form_addr or ("url" in goal)):
+        return refuse("mixed road keys: download keys cannot combine"
+                      " with other road keys")
+    if has_download:
+        sub = {k: goal[k] for k in DOWNLOAD_KEYS if k in goal}
+        return run_download_task(taskloop, open_page, read_links,
+                                 task, sub, decider,
+                                 transfer_root=transfer_root)
+    # Upload branch (V2-05 upload road): same precedence rationale as
+    # download; the file-input description must survive observing.
+    if has_upload and (has_form or has_loop or has_link or has_search
+                       or has_click or has_table or has_download
+                       or has_form_addr or ("url" in goal)):
+        return refuse("mixed road keys: upload keys cannot combine"
+                      " with other road keys")
+    if has_upload:
+        sub = {k: goal[k] for k in UPLOAD_KEYS if k in goal}
+        return run_upload_task(taskloop, open_page, read_controls,
+                               task, sub, decider,
+                               transfer_root=transfer_root)
     if has_observe and (has_form or has_loop or has_link
                         or has_form_addr):
         return refuse("mixed road keys: observe keys cannot combine with"

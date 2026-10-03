@@ -83,8 +83,9 @@ def test_predicate_sets():
     assert DIFF_PREDICATES == {"text_appeared", "text_disappeared",
                                "count_increased", "count_decreased",
                                "url_changed"}
-    assert len(ALL_PREDICATES) == 12  # 7 absolute (incl. slice-25
-                                # checked/unchecked) + 5 diff
+    assert len(ALL_PREDICATES) == 13  # 8 absolute (incl. slice-25
+                                # checked/unchecked and V2-05
+                                # file_nonempty) + 5 diff
 
 
 def test_store_cap_and_latest():

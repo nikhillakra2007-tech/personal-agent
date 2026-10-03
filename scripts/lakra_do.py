@@ -33,6 +33,14 @@ Usage:
         --expect "Cathedral results" [--yes | --no | --poll SECS]
     .\\.venv\\Scripts\\python.exe scripts\\lakra_do.py --road click
         --url <page> --text "Continue" --expect "Welcome" [--yes]
+    .\\.venv\\Scripts\\python.exe scripts\\lakra_do.py --road table
+        --url <page> --table "courses" --expect "Linear Algebra" [--yes]
+    .\\.venv\\Scripts\\python.exe scripts\\lakra_do.py --road download
+        --url <page> --download "Monthly report" --dest report.txt
+        --expect "Monthly report" [--yes | --no | --poll SECS]
+    .\\.venv\\Scripts\\python.exe scripts\\lakra_do.py --road upload
+        --url <page> --upload "Expense receipt" --src receipt.txt
+        --expect "received receipt.txt" [--yes | --no | --poll SECS]
 
 Natural-language goal shaping (slice-46/47 + NL click: deterministic
 prose -> road dict; observe, follow, search, and click shape, all
@@ -88,6 +96,21 @@ Read-only visibility (no browser, no writes, no deciders):
 Env/overrides (tests, portability):
     LAKRA_DB    : database path (else the shared local lakra.db)
     --audit PATH, --profile-dir PATH, --shots-dir PATH
+    --transfers-dir PATH: sandbox for browser.download destinations
+      and browser.upload sources (default var/transfers; every path
+      is realpath-confined under it, no absolute-outside, no ../,
+      no symlink escape)
+    --session-profile NAME: opt-in persistent browser profile
+      (default: existing ephemeral profile behavior, unchanged;
+      named profiles live under --sessions-dir, default
+      var/sessions; names are validated, never paths)
+    --sessions-dir PATH: root for named session profiles
+    --clear-session-profile NAME: delete one named profile and exit
+    --planner deterministic|model: decomposition planner for
+      --decompose only (default deterministic; model uses a local
+      provider and falls back on any rejection)
+    --model NAME, --model-url URL, --model-timeout-s SECS: local
+      model configuration (loopback Ollama only)
     --ram-floor-mb N, --cpu-ceiling PCT: guard pressure floors
       (defaults 2048 MB / 90 pct, the monitor defaults; lowered only
       for loaded test boxes, never raised silently)
@@ -125,6 +148,7 @@ from lakra.execution.browser.observer import (  # noqa: E402
     collect_clicks,
     collect_controls,
     collect_links,
+    collect_tables,
 )
 from lakra.execution.browser.sessions import BrowserSessions  # noqa: E402
 from lakra.execution.registry import ToolRegistry  # noqa: E402
@@ -133,7 +157,8 @@ from lakra.resources.monitor import ResourceMonitor  # noqa: E402
 
 USAGE = (__doc__ or "").strip()
 
-ROADS = ("follow", "loop", "form", "observe", "search", "click")
+ROADS = ("follow", "loop", "form", "observe", "search", "click", "table",
+         "download", "upload")
 
 
 class UsageError(ValueError):
@@ -149,7 +174,12 @@ def parse_args(argv: list[str]) -> dict:
                   "--poll", "--audit", "--profile-dir", "--shots-dir",
                   "--allow-domain", "--ram-floor-mb", "--cpu-ceiling",
                    "--resume", "--status", "--state", "--last", "--format",
-                   "--query", "--chain-file", "--from-leg", "--decompose"}
+                   "--query", "--chain-file", "--from-leg", "--decompose",
+                   "--table", "--download", "--dest", "--upload", "--src",
+                   "--transfers-dir", "--session-profile",
+                   "--sessions-dir", "--clear-session-profile",
+                   "--planner", "--model", "--model-url",
+                   "--model-timeout-s"}
     flags = {"--yes", "--no", "--list", "--daemon", "--once"}
     while i < len(argv):
         tok = argv[i]
@@ -204,18 +234,42 @@ def build_goal(opts: dict) -> dict:
     road = opts.get("road")
     if road not in ROADS:
         raise UsageError(
-            "--road must be one of follow|loop|form|observe|search|click")
+            "--road must be one of"
+            " follow|loop|form|observe|search|click|table|download|upload")
     url = opts.get("url")
     if not url:
         raise UsageError(f"--road {road} needs --url")
+    if road == "table":
+        _forbid(opts, road, "max_items", "max_iters", "slots_json",
+                "submit", "query", "text", "download", "dest",
+                "upload", "src")
+        _need(opts, road, "table", "expect")
+        return {"table_url": url, "table_text": opts["table"],
+                "expect_text": opts["expect"]}
+    if road == "download":
+        _forbid(opts, road, "max_items", "max_iters", "slots_json",
+                "submit", "query", "text", "table", "upload", "src")
+        _need(opts, road, "download", "dest", "expect")
+        return {"download_url": url,
+                "download_text": opts["download"],
+                "dest_path": opts["dest"],
+                "expect_text": opts["expect"]}
+    if road == "upload":
+        _forbid(opts, road, "max_items", "max_iters", "slots_json",
+                "submit", "query", "text", "table", "download", "dest")
+        _need(opts, road, "upload", "src", "expect")
+        return {"upload_url": url, "upload_text": opts["upload"],
+                "src_path": opts["src"],
+                "expect_text": opts["expect"]}
     if road == "follow":
         _forbid(opts, road, "max_items", "max_iters", "slots_json",
-                "submit")
+                "submit", "table", "download", "dest", "upload", "src")
         _need(opts, road, "text", "expect")
         return {"list_url": url, "goal_text": opts["text"],
                 "body_expect": opts["expect"]}
     if road == "loop":
-        _forbid(opts, road, "slots_json", "submit")
+        _forbid(opts, road, "slots_json", "submit", "table", "download",
+                "dest", "upload", "src")
         _need(opts, road, "text", "expect", "max_items", "max_iters")
         return {"list_url": url, "goal_text": opts["text"],
                 "body_expect": opts["expect"],
@@ -223,23 +277,26 @@ def build_goal(opts: dict) -> dict:
                 "max_iters": _parse_int(opts, "max_iters")}
     if road == "observe":
         _forbid(opts, road, "max_items", "max_iters", "slots_json",
-                "submit", "query")
+                "submit", "query", "table", "download", "dest",
+                "upload", "src")
         _need(opts, road, "text", "expect")
         return {"url": url, "expect_text": opts["expect"]}
     if road == "search":
         _forbid(opts, road, "max_items", "max_iters", "slots_json",
-                "text")
+                "text", "table", "download", "dest", "upload", "src")
         _need(opts, road, "query", "submit", "expect")
         return {"search_url": url, "query": {"text": opts["query"]},
                 "submit_selector": opts["submit"],
                 "expect_text": opts["expect"]}
     if road == "click":
         _forbid(opts, road, "max_items", "max_iters", "slots_json",
-                "submit", "query")
+                "submit", "query", "table", "download", "dest",
+                "upload", "src")
         _need(opts, road, "text", "expect")
         return {"click_url": url, "click_text": opts["text"],
                 "expect_text": opts["expect"]}
-    _forbid(opts, road, "text", "expect", "max_items", "max_iters")
+    _forbid(opts, road, "text", "expect", "max_items", "max_iters",
+            "table", "download", "dest", "upload", "src")
     _need(opts, road, "slots_json", "submit")
     try:
         slots = json.loads(opts["slots_json"])
@@ -261,7 +318,13 @@ def default_task_goal(road: str, opts: dict) -> str:
     if road == "search":
         return f"Web search {opts.get('query', 'the query')}"
     if road == "click":
-        return f"Click {opts.get('text', 'the control')}"
+        return f"Click {opts.get('click_text', 'the control')}"
+    if road == "table":
+        return f"Extract table {opts.get('table', 'the table')}"
+    if road == "download":
+        return f"Download {opts.get('download', 'the file')}"
+    if road == "upload":
+        return f"Upload {opts.get('upload', 'the file')}"
     return "Submit the form"
 
 
@@ -317,30 +380,188 @@ def pick_decider(args: list[str], approvals: Approvals,
     return ScriptedDecider(answer == "y")
 
 
-def build_stack(sessions, db, audit_path, shots_dir, monitor):
+def transfers_dir_for(opts: dict) -> Path:
+    """Sandbox root for browser transfers (V2-05). One root only:
+    download destinations and upload sources confine under it."""
+    return Path(opts.get("transfers_dir")
+                or (ROOT / "var" / "transfers"))
+
+
+def sessions_root_for(opts: dict) -> Path:
+    """Lakra-controlled root for named session profiles (V2-06).
+    Profiles never address arbitrary directories: names resolve
+    under this root only."""
+    return Path(opts.get("sessions_dir")
+                or (ROOT / "var" / "sessions"))
+
+
+def select_session(opts: dict, profile_dir: Path):
+    """Resolve the browser profile directory for a run (V2-06).
+
+    Returns (name_or_None, directory, reused). Without
+    --session-profile the directory passes through untouched
+    (existing ephemeral behavior, byte-identical). With the flag the
+    name validates and resolves under the sessions root; reused is
+    True when the profile already held state. Combining the flag
+    with --profile-dir refuses (ambiguous selection).
+    """
+    from lakra.control.profiles import resolve_profile
+    name = opts.get("session_profile")
+    if name is None:
+        return None, Path(profile_dir), False
+    if opts.get("profile_dir") is not None:
+        raise UsageError("--session-profile takes no --profile-dir")
+    try:
+        target = resolve_profile(sessions_root_for(opts), name)
+    except Exception as exc:
+        raise UsageError(f"invalid --session-profile ({exc})")
+    from lakra.control.profiles import validate_profile_name
+    reused = target.is_dir() and any(target.iterdir())
+    return validate_profile_name(name), target, reused
+
+
+def session_exclusive(opts: dict) -> bool:
+    """True when the run selected a named profile (V2-06): named
+    profiles launch under Lakra's cross-process lock, so two live
+    holders never silently merge state. Ephemeral runs stay
+    unlocked (V1 behavior identical)."""
+    return opts.get("session_profile") is not None
+
+
+def resolve_model_provider(opts: dict):
+    """Build the V2-07 model provider from operator flags (or None
+    for deterministic planning). Raises UsageError on unusable
+    configuration — always before anything launches."""
+    if (opts.get("planner") or "deterministic") == "deterministic":
+        if opts.get("model") is not None \
+                or opts.get("model_url") is not None \
+                or opts.get("model_timeout_s") is not None:
+            raise UsageError("--model/--model-url/--model-timeout-s"
+                             " need --planner model")
+        return None
+    from lakra.control.model_provider import (
+        ModelProviderConfigError,
+        build_provider,
+    )
+    try:
+        timeout = int(opts.get("model_timeout_s", 60))
+    except (TypeError, ValueError):
+        raise UsageError("--model-timeout-s must be an integer")
+    try:
+        return build_provider(
+            opts.get("model") or "llama3.1:8b",
+            base_url=opts.get("model_url")
+            or "http://127.0.0.1:11434",
+            timeout_s=timeout)
+    except ModelProviderConfigError as exc:
+        raise UsageError(f"unusable model configuration ({exc})")
+
+
+def print_session_lines(name, reused) -> None:
+    """Safe session metadata only (V2-06): profile name + fresh/reused.
+    Never contents, cookies, tokens, or storage values. Ephemeral runs
+    print nothing (V1 output byte-identical)."""
+    if name is None:
+        return
+    print(f"session profile: {name}")
+    print(f"session reused: {'yes' if reused else 'no'}")
+
+
+def item_session_profile(legs):
+    """Explicit session identity for one queue item's legs (V2-06).
+
+    Returns the single distinct session_profile across legs, or None
+    when legs carry none (existing ephemeral behavior). Refuses
+    non-string values, invalid names, and mixed profiles (ambiguous
+    selection must never silently pick one). Queue items carry the
+    identity in-leg so no schema migration is needed and nothing is
+    ever inherited silently.
+    """
+    from lakra.control.profiles import (
+        ProfileRefused,
+        validate_profile_name,
+    )
+    names = []
+    for leg in (legs or []):
+        if not isinstance(leg, dict):
+            continue
+        value = leg.get("session_profile")
+        if value is None:
+            continue
+        if not isinstance(value, str):
+            raise ProfileRefused(
+                "session_profile must be a string")
+        names.append(validate_profile_name(value))
+    distinct = sorted(set(names))
+    if len(distinct) > 1:
+        raise ProfileRefused(
+            f"ambiguous session profiles {distinct}: refuse, never mix")
+    return distinct[0] if distinct else None
+
+
+def chain_wants_downloads(legs) -> bool:
+    """True when any leg runs the download road (V2-05): the browser
+    context must then accept downloads, or the gated action fails
+    closed. Pure scan, no browser."""
+    try:
+        return any(isinstance(leg, dict) and leg.get("road") == "download"
+                   for leg in (legs or []))
+    except TypeError:
+        return False
+
+
+def queue_wants_downloads(db) -> bool:
+    """True when queued/claimed work may run a download leg (V2-05):
+    lets the daemon enable the context switch only when some item
+    could need it. Reads only; malformed rows are someone else's
+    refusal, never a reason to enable."""
+    from lakra.control import work_queue as _wq
+    try:
+        items = _wq.list_items(db)
+    except Exception:
+        return False
+    for item in items:
+        if item.get("state") not in ("QUEUED", "CLAIMED"):
+            continue
+        try:
+            raw = json.loads(item.get("legs_json") or "{}") or {}
+            legs = raw.get("legs") or []
+        except (ValueError, AttributeError):
+            continue
+        if chain_wants_downloads(legs):
+            return True
+    return False
+
+
+def build_stack(sessions, db, audit_path, shots_dir, monitor,
+                transfer_root=None):
     """Assemble the real browser stack on live sessions + database.
 
     The exact construction the CLI always used; shared by the fresh
     and resume paths so both run the identical policy/guard/router
-    machinery.
+    machinery. transfer_root (V2-05) confines the download/upload
+    executors and the file_nonempty predicate; None disables both
+    transfer executors outright.
     """
     registry = TaskRegistry(store=db)
     audit = AuditLog(audit_path)
     sched = Scheduler(registry, store=db)
     approvals = Approvals(registry, store=db)
     tools = ToolRegistry()
-    hands = BrowserActions(sessions)
+    hands = BrowserActions(sessions, transfer_root=transfer_root)
     obs = BrowserObserver(sessions, shots_dir)
     for kind in ("browser.navigate", "browser.snapshot",
                  "browser.screenshot"):
         tools.register(kind, obs)
     for kind in ("browser.click", "browser.type", "browser.press",
                  "browser.scroll", "browser.wait", "browser.submit",
-                 "browser.check", "browser.select"):
+                 "browser.check", "browser.select",
+                 "browser.download", "browser.upload"):
         tools.register(kind, hands)
     router = ToolRouter(registry, tools, approvals, audit, sched)
     ctrl = BrowserController(router, hands, audit, sched,
-                             observer=obs)
+                             observer=obs,
+                             transfer_root=transfer_root)
     guards = Guards(scheduler=sched, monitor=monitor)
     runner = Runner(
         ctrl, sched, audit,
@@ -447,6 +668,12 @@ def _chain_total_legs(goal) -> int | None:
 def _road_of_hints(hints: dict) -> str:
     if not isinstance(hints, dict):
         return "unknown"
+    if "dest_path" in hints:
+        return "download"
+    if "src_path" in hints:
+        return "upload"
+    if "table_text" in hints:
+        return "table"
     if "fields" in hints:
         return "form"
     if "link_text" in hints:
@@ -812,7 +1039,10 @@ def run_resume(argv, opts, audit_path, profile_dir, shots_dir,
     from lakra.control.resume import ResumeRefused, resume_info, resume_task
     for flag in ("road", "url", "text", "expect", "max_items",
                  "max_iters", "slots_json", "submit", "goal", "query",
-                 "chain_file", "from_leg", "decompose",
+                 "chain_file", "from_leg", "decompose", "table",
+                 "download", "dest", "upload", "src",
+                 "clear_session_profile",
+                 "planner", "model", "model_url", "model_timeout_s",
                  "daemon", "once"):
         if opts.get(flag) is not None:
             print(f"usage error: --resume takes no"
@@ -842,7 +1072,14 @@ def run_resume(argv, opts, audit_path, profile_dir, shots_dir,
               " resume it with --resume TASK_ID --chain-file FILE"
               " --from-leg N")
         return 1
-    sessions = BrowserSessions(profile_dir)
+    try:
+        _sess_name, _sess_dir, _sess_reused = select_session(
+            opts, profile_dir)
+    except UsageError as exc:
+        print(f"usage error: {exc}")
+        return 1
+    sessions = BrowserSessions(_sess_dir,
+                               exclusive=session_exclusive(opts))
     db = None
     try:
         sessions.launch()
@@ -902,6 +1139,7 @@ def run_resume(argv, opts, audit_path, profile_dir, shots_dir,
                 db.close()
         except Exception:
             pass
+    print_session_lines(_sess_name, _sess_reused)
     return finish(res, info["road"], info["task_id"], ns["registry"],
                   audit_path)
 
@@ -920,7 +1158,10 @@ def run_chain_file(argv, opts, audit_path, profile_dir, shots_dir,
         return 1
     for flag in ("road", "url", "text", "expect", "max_items",
                  "max_iters", "slots_json", "submit", "goal", "query",
-                 "decompose", "daemon", "once"):
+                 "decompose", "table", "download", "dest", "upload",
+                 "src", "clear_session_profile",
+                 "planner", "model", "model_url", "model_timeout_s",
+                 "daemon", "once"):
         if opts.get(flag) is not None:
             print(f"usage error: --chain-file takes no"
                   f" --{flag.replace('_', '-')}")
@@ -936,7 +1177,20 @@ def run_chain_file(argv, opts, audit_path, profile_dir, shots_dir,
     except (TypeError, ValueError):
         print("usage error: --from-leg must be an integer")
         return 1
-    sessions = BrowserSessions(profile_dir)
+    # V2-05: the download context switch is fixed at launch, so scan
+    # the (already read) chain file for a download leg first. The
+    # scan is pure JSON; validation still happens inside run_chain.
+    legs_hint = chain.get("legs") if isinstance(chain, dict) else None
+    try:
+        _sess_name, _sess_dir, _sess_reused = select_session(
+            opts, profile_dir)
+    except UsageError as exc:
+        print(f"usage error: {exc}")
+        return 1
+    sessions = BrowserSessions(
+        _sess_dir,
+        accept_downloads=chain_wants_downloads(legs_hint),
+        exclusive=session_exclusive(opts))
     db = None
     try:
         sessions.launch()
@@ -945,7 +1199,8 @@ def run_chain_file(argv, opts, audit_path, profile_dir, shots_dir,
         return 1
     try:
         db = Database()
-        ns = build_stack(sessions, db, audit_path, shots_dir, monitor)
+        ns = build_stack(sessions, db, audit_path, shots_dir, monitor,
+                         transfer_root=transfers_dir_for(opts))
         registry, taskloop, hands = (ns["registry"], ns["taskloop"],
                                      ns["hands"])
         approvals = ns["approvals"]
@@ -973,9 +1228,14 @@ def run_chain_file(argv, opts, audit_path, profile_dir, shots_dir,
         def read_clicks():
             return list(collect_clicks(hands.page))
 
+        def read_tables():
+            return list(collect_tables(hands.page))
+
         res = run_chain(taskloop, db, hands.open, read_pairs,
                         read_controls, task, chain, decider,
-                        from_leg=from_leg, read_clicks=read_clicks)
+                        from_leg=from_leg, read_clicks=read_clicks,
+                        read_tables=read_tables,
+                        transfer_root=transfers_dir_for(opts))
     except Exception as exc:
         print(f"error: {exc}")
         return 1
@@ -990,6 +1250,7 @@ def run_chain_file(argv, opts, audit_path, profile_dir, shots_dir,
         except Exception:
             pass
 
+    print_session_lines(_sess_name, _sess_reused)
     return finish(res, "chain", task.task_id, registry, audit_path)
 
 
@@ -1017,6 +1278,9 @@ def run_chain_resume(argv, opts, audit_path, profile_dir, shots_dir,
     from lakra.control.tasks import TERMINAL
     for flag in ("road", "url", "text", "expect", "max_items",
                  "max_iters", "slots_json", "submit", "goal", "query",
+                 "table", "download", "dest", "upload", "src",
+                 "clear_session_profile",
+                 "planner", "model", "model_url", "model_timeout_s",
                  "daemon", "once"):
         if opts.get(flag) is not None:
             print(f"usage error: --resume --chain-file takes no"
@@ -1046,11 +1310,20 @@ def run_chain_resume(argv, opts, audit_path, profile_dir, shots_dir,
         print(f"refused: invalid from_leg {opts.get('from_leg', 1)!r}"
               f" for a {len(legs)}-leg chain")
         return 1
-    sessions = BrowserSessions(profile_dir)
+    try:
+        _sess_name, _sess_dir, _sess_reused = select_session(
+            opts, profile_dir)
+    except UsageError as exc:
+        print(f"usage error: {exc}")
+        return 1
+    sessions = BrowserSessions(
+        _sess_dir, accept_downloads=chain_wants_downloads(legs),
+        exclusive=session_exclusive(opts))
     db = None
     try:
         db = Database(db_path) if db_path is not None else Database()
-        ns = build_stack(sessions, db, audit_path, shots_dir, monitor)
+        ns = build_stack(sessions, db, audit_path, shots_dir, monitor,
+                         transfer_root=transfers_dir_for(opts))
         registry = ns["registry"]
         try:
             task = registry.get(task_id)
@@ -1146,11 +1419,16 @@ def run_chain_resume(argv, opts, audit_path, profile_dir, shots_dir,
             def read_clicks():
                 return list(collect_clicks(hands.page))
 
+            def read_tables():
+                return list(collect_tables(hands.page))
+
             print(f"resume: task {task_id} ({task.status.value})"
                   f" -> chain legs {from_leg}..{len(legs)}")
             res = run_chain(ns["taskloop"], db, hands.open, read_pairs,
                             read_controls, task, chain, decider,
-                            from_leg=from_leg, read_clicks=read_clicks)
+                            from_leg=from_leg, read_clicks=read_clicks,
+                            read_tables=read_tables,
+                            transfer_root=transfers_dir_for(opts))
         except Exception as exc:
             print(f"error: {exc}")
             return 1
@@ -1167,6 +1445,7 @@ def run_chain_resume(argv, opts, audit_path, profile_dir, shots_dir,
                 db.close()
         except Exception:
             pass
+    print_session_lines(_sess_name, _sess_reused)
     return finish(res, "chain", task_id, registry, audit_path)
 
 
@@ -1191,7 +1470,9 @@ def run_decompose(argv, opts, audit_path, profile_dir, shots_dir,
     from lakra.execution.browser.observer import collect_submits
     for flag in ("road", "url", "text", "expect", "max_items",
                  "max_iters", "slots_json", "submit", "goal", "query",
-                 "chain_file", "resume", "daemon", "once"):
+                 "chain_file", "resume", "table", "download", "dest",
+                 "upload", "src", "clear_session_profile",
+                 "daemon", "once"):
         if opts.get(flag) is not None:
             print(f"usage error: --decompose takes no"
                   f" --{flag.replace('_', '-')}")
@@ -1200,11 +1481,49 @@ def run_decompose(argv, opts, audit_path, profile_dir, shots_dir,
     if not prose or not prose.strip():
         print("usage error: --decompose needs non-empty prose")
         return 1
-    try:
-        legs = decompose_goal(prose)
-    except DecomposeRefused as exc:
-        print(f"refused: {exc}")
+    planner_name = opts.get("planner") or "deterministic"
+    if planner_name not in ("deterministic", "model"):
+        print("usage error: --planner must be deterministic|model")
         return 1
+    if planner_name == "deterministic":
+        print("planner: deterministic")
+        try:
+            legs = decompose_goal(prose)
+        except DecomposeRefused as exc:
+            print(f"refused: {exc}")
+            return 1
+    else:
+        # V2-07 model planning happens here, before the browser
+        # launches: the provider is untrusted input, and the legs
+        # below are validated V2-01 road dicts either way.
+        try:
+            provider = resolve_model_provider(opts)
+        except UsageError as exc:
+            print(f"usage error: {exc}")
+            return 1
+        from lakra.control.model_planner import plan_with_fallback
+        from lakra.control.model_provider import provider_available
+        if not provider_available(provider):
+            # Fast path: runtime down means the calls would fail
+            # anyway; fall back without burning planning budget.
+            print("planner: model->fallback (provider unavailable)")
+            try:
+                legs = decompose_goal(prose)
+            except DecomposeRefused as exc:
+                print(f"refused: {exc}")
+                return 1
+        else:
+            try:
+                legs, attempt = plan_with_fallback(prose, provider)
+            except DecomposeRefused as exc:
+                print(f"refused: {exc}")
+                return 1
+            if attempt.fallback_used:
+                print(f"planner: model->fallback"
+                      f" ({attempt.rejection_reason})")
+            else:
+                print(f"planner: model ({provider.name},"
+                      f" {attempt.latency_ms}ms)")
     try:
         from_leg = int(opts.get("from_leg", 1))
     except (TypeError, ValueError):
@@ -1214,7 +1533,14 @@ def run_decompose(argv, opts, audit_path, profile_dir, shots_dir,
         print(f"refused: invalid from_leg {opts.get('from_leg', 1)!r}"
               f" for a {len(legs)}-leg chain")
         return 1
-    sessions = BrowserSessions(profile_dir)
+    try:
+        _sess_name, _sess_dir, _sess_reused = select_session(
+            opts, profile_dir)
+    except UsageError as exc:
+        print(f"usage error: {exc}")
+        return 1
+    sessions = BrowserSessions(_sess_dir,
+                               exclusive=session_exclusive(opts))
     db = None
     try:
         sessions.launch()
@@ -1223,7 +1549,8 @@ def run_decompose(argv, opts, audit_path, profile_dir, shots_dir,
         return 1
     try:
         db = Database()
-        ns = build_stack(sessions, db, audit_path, shots_dir, monitor)
+        ns = build_stack(sessions, db, audit_path, shots_dir, monitor,
+                         transfer_root=transfers_dir_for(opts))
         registry, taskloop, hands = (ns["registry"], ns["taskloop"],
                                      ns["hands"])
         approvals = ns["approvals"]
@@ -1271,9 +1598,14 @@ def run_decompose(argv, opts, audit_path, profile_dir, shots_dir,
         def read_clicks():
             return list(collect_clicks(hands.page))
 
+        def read_tables():
+            return list(collect_tables(hands.page))
+
         res = run_chain(taskloop, db, hands.open, read_pairs,
                         read_controls, task, {"legs": legs}, decider,
-                        from_leg=from_leg, read_clicks=read_clicks)
+                        from_leg=from_leg, read_clicks=read_clicks,
+                        read_tables=read_tables,
+                        transfer_root=transfers_dir_for(opts))
     except Exception as exc:
         print(f"error: {exc}")
         return 1
@@ -1288,6 +1620,7 @@ def run_decompose(argv, opts, audit_path, profile_dir, shots_dir,
         except Exception:
             pass
 
+    print_session_lines(_sess_name, _sess_reused)
     return finish(res, "chain", task.task_id, registry, audit_path)
 
 
@@ -1315,10 +1648,14 @@ def run_daemon(argv, opts, audit_path, profile_dir, shots_dir,
     from lakra.control import plan_store, task_store, work_queue
     from lakra.control.chain import run_chain
     from lakra.control.daemon import serve
+    from lakra.control.profiles import ProfileRefused, resolve_profile
     from lakra.control.resume import PLAN_LIVE
     from lakra.control.tasks import TERMINAL
     from lakra.control.work_queue import WorkRefused
-    for flag in ("road", "url", "text", "expect",
+    for flag in ("road", "url", "text", "expect", "table",
+                 "download", "dest", "upload", "src",
+                 "session_profile", "clear_session_profile",
+                 "planner", "model", "model_url", "model_timeout_s",
                  "max_iters", "slots_json", "submit", "goal", "query",
                  "chain_file", "from_leg", "resume", "decompose"):
         if opts.get(flag) is not None:
@@ -1335,19 +1672,81 @@ def run_daemon(argv, opts, audit_path, profile_dir, shots_dir,
     else:
         max_items = None
     owner = f"daemon-{os.getpid()}-{uuid4().hex[:8]}"
-    sessions = BrowserSessions(profile_dir)
+    # V2-05: the download context switch is fixed at launch, so peek
+    # at queued/claimed work for a download leg first. The peek is
+    # reads-only; every download still parks at its own L3 gate.
     db = None
+    try:
+        db = Database()
+        want_downloads = queue_wants_downloads(db)
+    except Exception as exc:
+        print(f"error: {exc}")
+        return 1
+    # V2-06: per-item session identity. The daemon never takes
+    # --session-profile (that would silently attach one profile to
+    # all queued work); each item's legs may carry one explicit
+    # session_profile instead, and sessions rotate to it. None means
+    # the existing ephemeral directory, unchanged.
+    ephemeral_dir = Path(profile_dir)
+    sessions_root = sessions_root_for(opts)
+    transfer_root = transfers_dir_for(opts)
+    session_key = None
+    sessions = BrowserSessions(ephemeral_dir,
+                               accept_downloads=want_downloads)
     try:
         sessions.launch()
     except Exception as exc:
         print(f"error: cannot launch browser ({exc})")
+        try:
+            db.close()
+        except Exception:
+            pass
         return 1
     try:
-        db = Database()
-        ns = build_stack(sessions, db, audit_path, shots_dir, monitor)
+        ns = build_stack(sessions, db, audit_path, shots_dir, monitor,
+                         transfer_root=transfer_root)
         registry, taskloop, hands = (ns["registry"], ns["taskloop"],
                                      ns["hands"])
         sched = ns["sched"]
+
+        def ensure_session(want):
+            """Rotate browser sessions to one item's profile (V2-06).
+
+            Returns None on success (already there or rotated), else
+            a detail string. Rotation closes the previous context and
+            rebuilds the stack on the same database and audit trail;
+            the queue claim is untouched. A contended profile (locked
+            by another live process) fails here so the item defers
+            under its lease instead of corrupting shared state.
+            """
+            nonlocal sessions, ns, registry, taskloop, hands, sched
+            nonlocal session_key
+            if want == session_key:
+                return None
+            try:
+                target = ephemeral_dir if want is None \
+                    else resolve_profile(sessions_root, want)
+            except ProfileRefused as exc:
+                return f"invalid session profile ({exc})"
+            try:
+                sessions.close()
+            except Exception:
+                pass
+            fresh = BrowserSessions(
+                target, accept_downloads=want_downloads,
+                exclusive=(want is not None))
+            try:
+                fresh.launch()
+            except Exception as exc:
+                return f"cannot launch browser session ({exc})"
+            sessions = fresh
+            ns = build_stack(sessions, db, audit_path, shots_dir,
+                             monitor, transfer_root=transfer_root)
+            registry, taskloop, hands = (
+                ns["registry"], ns["taskloop"], ns["hands"])
+            sched = ns["sched"]
+            session_key = want
+            return None
 
         def read_pairs():
             return list(collect_links(hands.page))
@@ -1358,7 +1757,23 @@ def run_daemon(argv, opts, audit_path, profile_dir, shots_dir,
         def read_clicks():
             return list(collect_clicks(hands.page))
 
+        def read_tables():
+            return list(collect_tables(hands.page))
+
         def execute(item, legs, from_leg):
+            try:
+                want = item_session_profile(legs)
+            except ProfileRefused as exc:
+                return {"outcome": "FAILED", "task_id": None,
+                        "detail": f"session profile refused ({exc})"}
+            problem = ensure_session(want)
+            if problem is not None:
+                if problem.startswith("invalid session profile"):
+                    return {"outcome": "FAILED", "task_id": None,
+                            "detail": problem}
+                return {"outcome": "DEFERRED",
+                        "task_id": item.get("task_id"),
+                        "detail": problem}
             total = len(legs)
             task_id = item.get("task_id")
             task = None
@@ -1374,6 +1789,17 @@ def run_daemon(argv, opts, audit_path, profile_dir, shots_dir,
                     allowed_domains=opts["allow_domains"] or ["file:"],
                     allowed_paths=[]))
                 task_id = task.task_id
+            if not item.get("task_id"):
+                # Bind at creation (before execution) so a crash
+                # between creation and settle cannot orphan the task:
+                # recovery reuses the bound task instead of creating
+                # a duplicate (same contract as bind_task documents).
+                try:
+                    work_queue.bind_task(db, item["work_id"], owner,
+                                         task_id)
+                except WorkRefused as exc:
+                    return {"outcome": "DEFERRED", "task_id": task_id,
+                            "detail": f"cannot bind task ({exc})"}
             try:
                 registry.checkout(task_id, "cli")
             except Exception as exc:
@@ -1384,6 +1810,17 @@ def run_daemon(argv, opts, audit_path, profile_dir, shots_dir,
             except Exception as exc:
                 return {"outcome": "DEFERRED", "task_id": task_id,
                         "detail": f"cannot refresh task state ({exc})"}
+            if str(task.status.value) == "QUEUED":
+                # Fresh task: enter RUNNING like every other chain
+                # entry does. Without this run_chain()'s end-of-chain
+                # COMPLETED transition (RUNNING-only) never fires and
+                # the item would park as DEFERRED forever.
+                try:
+                    registry.set_status(task_id, Status.RUNNING)
+                    task = registry.refresh(task_id)
+                except Exception as exc:
+                    return {"outcome": "DEFERRED", "task_id": task_id,
+                            "detail": f"cannot start task ({exc})"}
             if task.status in TERMINAL:
                 # Death between task settlement and queue settlement:
                 # adopt the terminal outcome, never re-execute.
@@ -1421,13 +1858,6 @@ def run_daemon(argv, opts, audit_path, profile_dir, shots_dir,
                 ns["audit"].log("PLAN_SUPERSEDED", task_id,
                                {"old_plan": pid, "new_plan": "-",
                                 "at_step": 0, "snapshot_chars": 0})
-            if not item.get("task_id"):
-                try:
-                    work_queue.bind_task(db, item["work_id"], owner,
-                                         task_id)
-                except WorkRefused as exc:
-                    return {"outcome": "DEFERRED", "task_id": task_id,
-                            "detail": f"cannot bind task ({exc})"}
             try:
                 decider = pick_decider(argv, ns["approvals"], task_id)
             except UsageError as exc:
@@ -1436,7 +1866,9 @@ def run_daemon(argv, opts, audit_path, profile_dir, shots_dir,
             res = run_chain(taskloop, db, hands.open, read_pairs,
                             read_controls, task, {"legs": legs},
                             decider, from_leg=from_leg,
-                            read_clicks=read_clicks)
+                            read_clicks=read_clicks,
+                            read_tables=read_tables,
+                            transfer_root=transfers_dir_for(opts))
             final = registry.get(task_id).status.value
             mapping = {"COMPLETED": "COMPLETED",
                        "CANCELLED": "CANCELLED", "FAILED": "FAILED"}
@@ -1484,7 +1916,10 @@ def run_visibility(opts: dict) -> int:
         return 1
     for flag in ("road", "url", "text", "expect", "max_items",
                  "max_iters", "slots_json", "submit", "goal", "resume",
-                 "query", "chain_file", "from_leg", "decompose",
+                 "query", "chain_file", "from_leg", "decompose", "table",
+                 "download", "dest", "upload", "src", "session_profile",
+                 "sessions_dir", "clear_session_profile",
+                 "planner", "model", "model_url", "model_timeout_s",
                  "daemon", "once"):
         if opts.get(flag) is not None:
             print(f"usage error: --list/--status take no"
@@ -1500,6 +1935,40 @@ def run_visibility(opts: dict) -> int:
         print("usage error: --status takes no --state")
         return 1
     return run_status(opts, audit_path)
+
+
+def run_clear_session(opts: dict) -> int:
+    """Delete one named session profile and exit (V2-06 lifecycle).
+
+    Pure filesystem operation: no browser, no database, no audit.
+    Refuses unknown names and anything outside the sessions root.
+    """
+    from lakra.control.profiles import ProfileRefused, clear_profile
+    for flag in ("road", "url", "text", "expect", "max_items",
+                 "max_iters", "slots_json", "submit", "goal", "query",
+                 "chain_file", "from_leg", "decompose", "resume",
+                 "table", "download", "dest", "upload", "src",
+                 "session_profile",
+                 "planner", "model", "model_url", "model_timeout_s",
+                 "daemon", "once", "list", "status", "state", "last",
+                 "format", "allow_domains", "ram_floor_mb",
+                 "cpu_ceiling", "audit", "profile_dir", "shots_dir",
+                 "transfers_dir", "poll", "yes", "no"):
+        if opts.get(flag):
+            print(f"usage error: --clear-session-profile takes no"
+                  f" --{flag.replace('_', '-')}")
+            return 1
+    name = opts.get("clear_session_profile")
+    if not name:
+        print("usage error: --clear-session-profile needs a name")
+        return 1
+    try:
+        target = clear_profile(sessions_root_for(opts), name)
+    except ProfileRefused as exc:
+        print(f"refused: {exc}")
+        return 1
+    print(f"cleared session profile: {target.name}")
+    return 0
 
 
 def run_goal(argv, opts, audit_path, profile_dir, shots_dir,
@@ -1520,8 +1989,11 @@ def run_goal(argv, opts, audit_path, profile_dir, shots_dir,
         print("usage error: --goal takes no --resume")
         return 1
     for flag in ("road", "url", "text", "expect", "max_items",
-                 "max_iters", "slots_json", "submit", "query",
+                 "max_iters", "slots_json", "submit", "query", "table",
+                 "download", "dest", "upload", "src",
                  "chain_file", "from_leg", "decompose",
+                 "clear_session_profile",
+                 "planner", "model", "model_url", "model_timeout_s",
                  "daemon", "once"):
         if opts.get(flag) is not None:
             print(f"usage error: --goal takes no"
@@ -1536,7 +2008,14 @@ def run_goal(argv, opts, audit_path, profile_dir, shots_dir,
     except UnknownGoalError as exc:
         print(f"refused: {exc}")
         return 1
-    sessions = BrowserSessions(profile_dir)
+    try:
+        _sess_name, _sess_dir, _sess_reused = select_session(
+            opts, profile_dir)
+    except UsageError as exc:
+        print(f"usage error: {exc}")
+        return 1
+    sessions = BrowserSessions(_sess_dir,
+                               exclusive=session_exclusive(opts))
     db = None
     try:
         sessions.launch()
@@ -1545,7 +2024,8 @@ def run_goal(argv, opts, audit_path, profile_dir, shots_dir,
         return 1
     try:
         db = Database()
-        ns = build_stack(sessions, db, audit_path, shots_dir, monitor)
+        ns = build_stack(sessions, db, audit_path, shots_dir, monitor,
+                         transfer_root=transfers_dir_for(opts))
         registry, taskloop, hands = (ns["registry"], ns["taskloop"],
                                      ns["hands"])
         approvals = ns["approvals"]
@@ -1585,9 +2065,13 @@ def run_goal(argv, opts, audit_path, profile_dir, shots_dir,
         def read_clicks():
             return list(collect_clicks(hands.page))
 
+        def read_tables():
+            return list(collect_tables(hands.page))
+
         res = run_task(taskloop, db, hands.open, read_pairs,
                        read_controls, task, shaped, decider,
-                       read_clicks=read_clicks)
+                       read_clicks=read_clicks, read_tables=read_tables,
+                       transfer_root=transfers_dir_for(opts))
     except Exception as exc:
         print(f"error: {exc}")
         return 1
@@ -1602,6 +2086,7 @@ def run_goal(argv, opts, audit_path, profile_dir, shots_dir,
         except Exception:
             pass
 
+    print_session_lines(_sess_name, _sess_reused)
     return finish(res, "goal", task.task_id, registry, audit_path)
 
 
@@ -1614,6 +2099,9 @@ def main(argv: list[str]) -> int:
 
     if opts.get("list") or opts.get("status") is not None:
         return run_visibility(opts)
+
+    if opts.get("clear_session_profile") is not None:
+        return run_clear_session(opts)
 
     if opts.get("format") is not None:
         print("usage error: --format applies only to --list/--status")
@@ -1662,6 +2150,12 @@ def main(argv: list[str]) -> int:
         return run_goal(argv, opts, audit_path, profile_dir,
                         shots_dir, monitor)
 
+    for flag in ("planner", "model", "model_url", "model_timeout_s"):
+        if opts.get(flag) is not None:
+            print(f"usage error: --road takes no"
+                  f" --{flag.replace('_', '-')} (planning flags need"
+                  " --decompose)")
+            return 1
     try:
         goal = build_goal(opts)
     except UsageError as exc:
@@ -1670,7 +2164,19 @@ def main(argv: list[str]) -> int:
     road = opts["road"]
     allow_domains = opts["allow_domains"] or ["file:"]
 
-    sessions = BrowserSessions(profile_dir)
+    # V2-05: only an explicit download execution gets a
+    # download-accepting context; every other road keeps the default.
+    # V2-06: an explicit --session-profile selects the profile
+    # directory; otherwise the existing ephemeral behavior is exact.
+    try:
+        _sess_name, _sess_dir, _sess_reused = select_session(
+            opts, profile_dir)
+    except UsageError as exc:
+        print(f"usage error: {exc}\n\n{USAGE}")
+        return 1
+    sessions = BrowserSessions(_sess_dir,
+                               accept_downloads=(road == "download"),
+                               exclusive=session_exclusive(opts))
     db = None
     try:
         sessions.launch()
@@ -1679,7 +2185,8 @@ def main(argv: list[str]) -> int:
         return 1
     try:
         db = Database()
-        ns = build_stack(sessions, db, audit_path, shots_dir, monitor)
+        ns = build_stack(sessions, db, audit_path, shots_dir, monitor,
+                         transfer_root=transfers_dir_for(opts))
         registry, taskloop, hands = (ns["registry"], ns["taskloop"],
                                      ns["hands"])
         approvals = ns["approvals"]
@@ -1707,10 +2214,14 @@ def main(argv: list[str]) -> int:
         def read_clicks():
             return list(collect_clicks(hands.page))
 
+        def read_tables():
+            return list(collect_tables(hands.page))
+
         read_links = read_texts if road == "loop" else read_pairs
         res = run_task(taskloop, db, hands.open, read_links,
                        read_controls, task, goal, decider,
-                       read_clicks=read_clicks)
+                       read_clicks=read_clicks, read_tables=read_tables,
+                       transfer_root=transfers_dir_for(opts))
     except Exception as exc:
         print(f"error: {exc}")
         return 1
@@ -1725,6 +2236,17 @@ def main(argv: list[str]) -> int:
         except Exception:
             pass
 
+    if road == "table":
+        # Machine-readable extraction output: the road's one
+        # JSON-serializable dict, deterministic key order, printed
+        # only on DONE (refusals carry no findings by contract).
+        for found in (getattr(res, "findings", None) or []):
+            print("table: " + json.dumps(found, sort_keys=True))
+    if road in ("download", "upload"):
+        # Machine-readable transfer summary, same DONE-only contract.
+        for found in (getattr(res, "findings", None) or []):
+            print(f"{road}: " + json.dumps(found, sort_keys=True))
+    print_session_lines(_sess_name, _sess_reused)
     return finish(res, road, task.task_id, registry, audit_path)
 
 

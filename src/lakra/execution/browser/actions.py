@@ -1,12 +1,14 @@
 """Slice-05: deterministic browser action executors (the "hands"), slice-22 submit.
 
 Kinds: browser.click | browser.type | browser.press | browser.scroll |
-browser.wait | browser.submit | browser.check | browser.select.
+browser.wait | browser.submit | browser.check | browser.select |
+browser.download | browser.upload (V2-05).
 Structured locators only; page.evaluate is
 banned. Each executor resolves its selector, acts with a bounded timeout,
 and reports an ExecuteResult — it NEVER judges success beyond its own
 execution. Whether the action achieved anything is verification.py's job,
-on fresh state.
+on fresh state (transfer executors additionally confirm their own file
+pre/post-conditions; the plan predicate re-confirms on fresh state).
 
 Submit (slice-22) activates a submit control by clicking it — the same
 physical mechanics as click, but a distinct kind so policy keeps it L3
@@ -16,6 +18,13 @@ themselves grant no authority.
 
 Target forms (documented contract, kept tiny):
   click:  "CSS selector"
+  download: "trigger-text\\n---\\ndest-relpath" (V2-05: trigger is the
+             grounded link text, exactly one match; dest is
+             sandbox-confined, never overwritten, size-bounded;
+             L3-gated like submit)
+  upload: "selector(#id)\\n---\\nsrc-relpath" (V2-05: grounded file-input
+             #id only, exactly one enabled file input; src is an
+             existing sandbox file, size-bounded; L3-gated like submit)
   type:   "selector\\n---\\ntext"            (fill: deterministic clear+set)
   press:  "selector\\n---\\nKey" | "Key"     (Key in PRESS_KEYS; no selector =
                                               focused element)
@@ -41,6 +50,9 @@ scroll/wait forms that don't parse, zero-match selectors.
 
 from __future__ import annotations
 
+import os
+from pathlib import Path
+
 from ..registry import ExecuteResult
 from ...control.policy import Action
 from ...control.tasks import Task
@@ -49,11 +61,18 @@ KINDS = frozenset({
     "browser.click", "browser.type", "browser.press",
     "browser.scroll", "browser.wait", "browser.submit",
     "browser.check", "browser.select",
+    "browser.download", "browser.upload",
 })
 
 MAX_SELECTOR_CHARS = 500
 ACTION_TIMEOUT_MS = 5000
 MAX_WAIT_MS = 10000
+
+# V2-05 transfer bounds. Single-file caps keep transfers deterministic
+# and memory-safe; the download wait is wall-time bounded like every
+# other browser action.
+MAX_TRANSFER_BYTES = 5_000_000
+DOWNLOAD_TIMEOUT_MS = 30000
 
 PRESS_KEYS = frozenset({
     "Enter", "Tab", "Escape", "Backspace", "Delete",
@@ -76,11 +95,41 @@ def _rung_note(rung: str) -> str:
 
 
 class BrowserActions:
-    """Router executor for the eight acting kinds. Needs the live page."""
+    """Router executor for the acting kinds (V2-05: ten). Needs the live page.
 
-    def __init__(self, sessions) -> None:
+    transfer_root confines browser.download destinations and
+    browser.upload sources to one sandbox directory (the
+    filesystem-executor confinement algorithm: realpath-prefix, so
+    absolute-outside, ../, and symlink escapes all refuse). None
+    disables both transfer executors outright.
+    """
+
+    def __init__(self, sessions, transfer_root=None) -> None:
         self.sessions = sessions
         self._page = None
+        if transfer_root is None:
+            self._transfer_root = None
+            self._transfer_real = None
+        else:
+            self._transfer_root = Path(transfer_root)
+            self._transfer_root.mkdir(parents=True, exist_ok=True)
+            self._transfer_real = os.path.realpath(self._transfer_root)
+
+    def _confine(self, target: str) -> Path | None:
+        """In-root path or None on escape (same contract as the
+        filesystem executor: absolute targets accepted iff they
+        resolve inside the root)."""
+        if self._transfer_real is None:
+            return None
+        if os.path.isabs(target):
+            full = os.path.realpath(target)
+        else:
+            full = os.path.realpath(
+                os.path.join(self._transfer_real, target))
+        if full != self._transfer_real and not full.startswith(
+                self._transfer_real + os.sep):
+            return None
+        return Path(full)
 
     @property
     def page(self):
@@ -131,6 +180,10 @@ class BrowserActions:
                 return self.check(action.target)
             if action.kind == "browser.select":
                 return self.select(action.target)
+            if action.kind == "browser.download":
+                return self.download(action.target)
+            if action.kind == "browser.upload":
+                return self.upload(action.target)
             return self.wait(action.target)
         except Exception as exc:
             return ExecuteResult(ok=False, error=f"action failed: {exc}")
@@ -384,6 +437,166 @@ class BrowserActions:
         return ExecuteResult(
             ok=True,
             output=f"selected {want} in {selector}{_rung_note(rung)}")
+
+    def download(self, target: str) -> ExecuteResult:
+        """Save a download triggered by one grounded control, sandboxed.
+
+        Target form: "selector\\n---\\ndest-relpath". The selector is
+        the grounded trigger text (follow-road discipline); exactly one
+        match is required — a changed page with twins refuses instead
+        of clicking first. The click runs inside expect_download
+        (bounded); the payload saves ONLY to the confined dest (no
+        overwrite of an existing file — refuse rather than invent
+        semantics), then must exist within 1..MAX_TRANSFER_BYTES or it
+        is deleted and the step fails. Runs exclusively behind the L3
+        approval-token path (router guarantees that, not this method).
+        No page.evaluate.
+        """
+        if "\n---\n" not in target:
+            return ExecuteResult(
+                ok=False,
+                error="download target must be 'selector\\n---\\ndest'")
+        selector, dest_rel = target.split("\n---\n", 1)
+        if self._transfer_root is None:
+            return ExecuteResult(
+                ok=False, error="refused: no transfer sandbox configured")
+        if not getattr(self.sessions, "accept_downloads", False):
+            return ExecuteResult(
+                ok=False,
+                error="refused: downloads not enabled for this session")
+        dest = self._confine(dest_rel.strip())
+        if dest is None:
+            return ExecuteResult(
+                ok=False,
+                error=f"refused: {dest_rel.strip()!r} escapes"
+                      " the transfer sandbox")
+        if not dest.name:
+            return ExecuteResult(
+                ok=False, error="refused: destination must name a file")
+        if dest.exists():
+            return ExecuteResult(
+                ok=False,
+                error=f"refused: {dest_rel.strip()!r} already exists"
+                      " (no silent overwrite)")
+        try:
+            loc, rung, n = self._locate(selector)
+        except (ValueError, LookupError) as exc:
+            return ExecuteResult(ok=False, error=str(exc))
+        if n != 1:
+            return ExecuteResult(
+                ok=False,
+                error=f"refused: {n} download triggers match"
+                      f" {selector!r}: resolve to one first")
+        try:
+            with self.page.expect_download(
+                    timeout=DOWNLOAD_TIMEOUT_MS) as dl_info:
+                loc.click(timeout=ACTION_TIMEOUT_MS)
+            download = dl_info.value
+        except Exception as exc:
+            return ExecuteResult(
+                ok=False, error=f"download did not start: {exc}")
+        if download.failure():
+            return ExecuteResult(
+                ok=False, error=f"download failed: {download.failure()}")
+        suggested = download.suggested_filename or ""
+        try:
+            dest.parent.mkdir(parents=True, exist_ok=True)
+            download.save_as(str(dest))
+        except Exception as exc:
+            return ExecuteResult(ok=False, error=f"save failed: {exc}")
+        try:
+            size = dest.stat().st_size
+        except OSError as exc:
+            return ExecuteResult(ok=False, error=f"unreadable file: {exc}")
+        if not 0 < size <= MAX_TRANSFER_BYTES:
+            try:
+                dest.unlink()
+            except OSError:
+                pass
+            return ExecuteResult(
+                ok=False,
+                error=f"refused: downloaded size {size} out of bounds"
+                      f" (1..{MAX_TRANSFER_BYTES})")
+        return ExecuteResult(
+            ok=True,
+            output=f"downloaded {dest_rel.strip()} ({size} bytes;"
+                   f" source suggested {suggested!r}){_rung_note(rung)}")
+
+    def upload(self, target: str) -> ExecuteResult:
+        """Set one grounded file input to a sandbox file (no click).
+
+        Target form: "selector\\n---\\nsrc-relpath". The selector must
+        be a grounded #id (form-road discipline — arbitrary CSS is
+        refused); exactly one element must match and it must be an
+        enabled file input (password/hidden/submit inputs never
+        qualify). The source must already exist in the sandbox as a
+        regular file within 0..MAX_TRANSFER_BYTES. Runs exclusively
+        behind the L3 approval-token path. No page.evaluate.
+        """
+        if "\n---\n" not in target:
+            return ExecuteResult(
+                ok=False,
+                error="upload target must be 'selector\\n---\\nsrc'")
+        selector, src_rel = target.split("\n---\n", 1)
+        if self._transfer_root is None:
+            return ExecuteResult(
+                ok=False, error="refused: no transfer sandbox configured")
+        selector = selector.strip()
+        if not selector.startswith("#"):
+            return ExecuteResult(
+                ok=False,
+                error="refused: upload needs a grounded #id selector")
+        err = _check_selector(selector)
+        if err:
+            return ExecuteResult(ok=False, error=err)
+        src = self._confine(src_rel.strip())
+        if src is None:
+            return ExecuteResult(
+                ok=False,
+                error=f"refused: {src_rel.strip()!r} escapes"
+                      " the transfer sandbox")
+        try:
+            is_file = src.is_file()
+            size = src.stat().st_size if is_file else -1
+        except OSError as exc:
+            return ExecuteResult(ok=False, error=f"unreadable file: {exc}")
+        if not is_file:
+            return ExecuteResult(
+                ok=False,
+                error=f"refused: {src_rel.strip()!r} is not an"
+                      " uploadable file")
+        if size > MAX_TRANSFER_BYTES:
+            return ExecuteResult(
+                ok=False,
+                error=f"refused: source size {size} exceeds"
+                      f" {MAX_TRANSFER_BYTES}")
+        try:
+            loc = self.page.locator(selector)
+            count = loc.count()
+        except Exception as exc:
+            return ExecuteResult(ok=False, error=f"upload failed: {exc}")
+        if count != 1:
+            return ExecuteResult(
+                ok=False,
+                error=f"refused: {count} upload inputs match"
+                      f" {selector!r}: resolve to one first")
+        try:
+            first = loc.first
+            if (first.get_attribute("type") or "").lower() != "file":
+                return ExecuteResult(
+                    ok=False,
+                    error=f"refused: {selector!r} is not a file input")
+            if first.is_disabled():
+                return ExecuteResult(
+                    ok=False,
+                    error=f"refused: {selector!r} is disabled")
+            first.set_input_files(str(src), timeout=ACTION_TIMEOUT_MS)
+        except Exception as exc:
+            return ExecuteResult(ok=False, error=f"upload failed: {exc}")
+        return ExecuteResult(
+            ok=True,
+            output=f"uploaded {src_rel.strip()} ({size} bytes)"
+                   f" into {selector}")
 
     def wait(self, target: str) -> ExecuteResult:
         try:

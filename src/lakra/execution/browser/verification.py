@@ -14,6 +14,10 @@ Predicates (target forms):
   text_contains:   literal text (in body text)
   url_is:          exact URL
   url_contains:   URL substring
+  file_nonempty:   sandbox-relative path (V2-05: the file exists under
+                   the transfer root, is a regular file, and holds at
+                   least one byte — the sanctioned exception to
+                   page-state verification, for download proof)
 """
 
 from __future__ import annotations
@@ -24,7 +28,8 @@ from dataclasses import dataclass
 @dataclass
 class Predicate:
     kind: str  # element_exists|element_visible|element_checked|
-               # element_unchecked|text_contains|url_is|url_contains
+               # element_unchecked|text_contains|url_is|url_contains|
+               # file_nonempty
     target: str
 
 
@@ -32,6 +37,7 @@ PREDICATES = frozenset({
     "element_exists", "element_visible", "element_checked",
     "element_unchecked", "text_contains",
     "url_is", "url_contains",
+    "file_nonempty",
 })
 
 # Diff predicates compare against a previous SnapshotRecord. They REQUIRE
@@ -50,11 +56,46 @@ class MissingBaselineError(RuntimeError):
     """Diff predicate invoked without a baseline snapshot."""
 
 
-def check(predicate: Predicate, page, previous=None) -> bool:
+def _confined_file(target: str, transfer_root):
+    """Sandbox-relative path -> absolute file, or None on any escape.
+    Mirrors the filesystem executor's realpath-prefix confinement: no
+    absolute-outside, no ../ escape, no symlink breakout (resolved
+    first, never trusted as spelled). Pure path math, no writes."""
+    import os
+    from pathlib import Path
+    if transfer_root is None:
+        return None
+    try:
+        root_real = os.path.realpath(transfer_root)
+    except Exception:
+        return None
+    if os.path.isabs(target):
+        full = os.path.realpath(target)
+    else:
+        full = os.path.realpath(os.path.join(root_real, target))
+    if full != root_real and not full.startswith(root_real + os.sep):
+        return None
+    return Path(full)
+
+
+def check(predicate: Predicate, page, previous=None,
+          transfer_root=None) -> bool:
     """Evaluate against live page state (+ baseline for diff kinds).
-    Never raises except MissingBaselineError; all else is False."""
+    Never raises except MissingBaselineError; all else is False.
+    file_nonempty reads transfer-root state instead of page state
+    (V2-05 download proof); without a root it reads False, never
+    True."""
     try:
         kind, target = predicate.kind, predicate.target
+        if kind == "file_nonempty":
+            path = _confined_file(target, transfer_root)
+            if path is None:
+                return False
+            try:
+                return path.is_file() \
+                    and path.stat().st_size > 0
+            except OSError:
+                return False
         if kind in DIFF_PREDICATES:
             if previous is None:
                 raise MissingBaselineError(

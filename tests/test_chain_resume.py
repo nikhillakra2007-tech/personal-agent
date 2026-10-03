@@ -234,8 +234,11 @@ def fake_browser(monkeypatch):
             return FakeLocator()
 
     class FakeSessions:
-        def __init__(self, profile_dir):
+        def __init__(self, profile_dir, accept_downloads=False,
+                     exclusive=False):
             self.profile_dir = profile_dir
+            self.accept_downloads = accept_downloads
+            self.exclusive = exclusive
             self.page = FakePage()
             self.launches = 0
             instances.append(self)
@@ -247,8 +250,9 @@ def fake_browser(monkeypatch):
             pass
 
     class FakeHands:
-        def __init__(self, sessions):
+        def __init__(self, sessions, transfer_root=None):
             self.sessions = sessions
+            self.transfer_root = transfer_root
             self.page = sessions.page
             self.opened = []
 
@@ -907,7 +911,8 @@ def test_bare_resume_refuses_chain_task_read_only(
     launched = []
 
     class NoBrowser:
-        def __init__(self, profile_dir):
+        def __init__(self, profile_dir, accept_downloads=False,
+                     exclusive=False):
             pass
 
         def launch(self):
@@ -956,7 +961,8 @@ def test_bare_resume_non_chain_task_passes_guard(
     Database(db_path).close()
 
     class NoBrowser:
-        def __init__(self, profile_dir):
+        def __init__(self, profile_dir, accept_downloads=False,
+                     exclusive=False):
             pass
 
         def launch(self):

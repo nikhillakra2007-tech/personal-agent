@@ -1,9 +1,12 @@
 """Slice-45: chained multi-template runs (sequential supervised legs).
 
 A chain is an ordered list of 2-4 legs, each naming one single-result
-road (follow | observe | form | search | click) with that road's exact
-existing goal dict. run_chain() drives the legs in order through the
-unchanged dispatcher, stopping at the first leg that cannot continue.
+road (follow | observe | form | search | click | table | download |
+upload) with that road's exact existing goal dict. run_chain() drives
+the legs in order through the unchanged dispatcher, stopping at the
+first leg that cannot continue. Consequential (download/upload) legs
+park at their own L3 gate per leg; denial stops the chain per the
+existing semantics and reruns demand fresh consent.
 
 Composition notes (all precedents, no new machinery):
 
@@ -43,7 +46,8 @@ from .tasks import Status
 
 MAX_LEGS = 4
 MIN_LEGS = 2
-SINGLE_ROADS = ("follow", "observe", "form", "search", "click")
+SINGLE_ROADS = ("follow", "observe", "form", "search", "click", "table",
+                "download", "upload")
 
 LEG_KEYS = {
     "follow": ("list_url", "goal_text", "body_expect"),
@@ -51,6 +55,10 @@ LEG_KEYS = {
     "form": ("form_url", "goal_slots", "submit_selector"),
     "search": ("search_url", "query", "submit_selector", "expect_text"),
     "click": ("click_url", "click_text", "expect_text"),
+    "table": ("table_url", "table_text", "expect_text"),
+    "download": ("download_url", "download_text", "dest_path",
+                 "expect_text"),
+    "upload": ("upload_url", "upload_text", "src_path", "expect_text"),
 }
 
 
@@ -86,6 +94,12 @@ def leg_goal_text(leg: dict) -> str:
         return f"Web search {text or 'the query'}"
     if road == "click":
         return f"Click {leg.get('click_text', 'the control')}"
+    if road == "table":
+        return f"Extract table {leg.get('table_text', 'the table')}"
+    if road == "download":
+        return f"Download {leg.get('download_text', 'the file')}"
+    if road == "upload":
+        return f"Upload {leg.get('upload_text', 'the file')}"
     return "Chained leg"
 
 
@@ -121,7 +135,8 @@ def validate_chain(chain: dict) -> list:
 
 def run_chain(taskloop: TaskLoop, store, open_page, read_links,
                read_controls, task, chain: dict, decider,
-               observe=None, from_leg: int = 1, read_clicks=None):
+               observe=None, from_leg: int = 1, read_clicks=None,
+               read_tables=None, transfer_root=None):
     """Drive a validated chain to DONE/STOPPED/PAUSED.
 
     Returns ChainResult; preconditions fail as shaped STOPPED results
@@ -170,7 +185,9 @@ def run_chain(taskloop: TaskLoop, store, open_page, read_links,
             task.goal = leg_goal_text(leg)
             res = run_task(loop, sibling.store, open_page, read_links,
                            read_controls, task, leg, decider,
-                           read_clicks=read_clicks)
+                           read_clicks=read_clicks,
+                           read_tables=read_tables,
+                           transfer_root=transfer_root)
             steps += res.steps_done
             if res.status == "DONE":
                 done = n
@@ -189,15 +206,24 @@ def run_chain(taskloop: TaskLoop, store, open_page, read_links,
     finally:
         task.goal = original_goal
         try:
-            # Repair routing text leaked into the persisted row by
-            # mid-chain status transitions (set_status persists the
-            # whole in-memory object, which moves per leg above).
-            # The DB row must keep the chain goal per this module's
-            # contract; lifecycle semantics are untouched (no
-            # transition, same status rewritten).
+            # Flush the chain run's accumulated history without
+            # clobbering shared truth. update_task() excludes the
+            # write-once goal (V1-D1), so only status/owner/history
+            # ride along — and status/owner may have moved in another
+            # process while parked at a leg gate (external approve or
+            # deny). Rewriting the whole in-memory object would revert
+            # such a move to stale pre-park state (e.g. an external
+            # CANCELLED rewritten to WAITING_APPROVAL). Merge instead:
+            # lifecycle columns come from the persisted row, history
+            # (append-only, this process's records) from memory.
             from . import task_store
-            task_store.update_task(
-                store if store is not None else base.store, task)
+            db = store if store is not None else base.store
+            persisted = task_store.load_task(db, task.task_id)
+            if persisted is None:
+                task_store.update_task(db, task)
+            else:
+                persisted.history = task.history
+                task_store.update_task(db, persisted)
         except Exception:
             pass  # chain outcome stands; repair is best-effort here
     try:

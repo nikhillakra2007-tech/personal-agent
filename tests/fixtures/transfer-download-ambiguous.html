@@ -1,0 +1,16 @@
+<html><head><title>Twin Exports — Demo Portal</title></head>
+<body>
+<h1>Twin exports</h1>
+<a id="rep-a" href="#">Download monthly report</a>
+<a id="rep-b" href="#">Download monthly report</a>
+<script>
+function wire(id, text, name) {
+  var blob = new Blob([text], {type: 'text/plain'});
+  var a = document.getElementById(id);
+  a.href = URL.createObjectURL(blob);
+  a.download = name;
+}
+wire('rep-a', 'payload alpha', 'report-a.txt');
+wire('rep-b', 'payload beta', 'report-b.txt');
+</script>
+</body></html>

@@ -1,0 +1,20 @@
+<html><head><title>Two Desks — Demo Portal</title></head>
+<body>
+<h1>Two desks</h1>
+<label for="f-a">Expense receipt north</label>
+<input type="file" id="f-a">
+<label for="f-b">Expense receipt south</label>
+<input type="file" id="f-b">
+<span id="upload-status">nothing uploaded</span>
+<script>
+function watch(id) {
+  document.getElementById(id).addEventListener('change', function () {
+    var f = this.files[0];
+    document.getElementById('upload-status').textContent =
+      f ? ('received ' + f.name) : 'nothing uploaded';
+  });
+}
+watch('f-a');
+watch('f-b');
+</script>
+</body></html>

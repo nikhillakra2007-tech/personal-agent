@@ -122,14 +122,17 @@ def get(db, work_id: str) -> dict | None:
 
 
 def list_items(db, state: str | None = None) -> list:
+    # FIFO order is rowid (insertion) order: wall-clock stamps tie on
+    # coarse-clock platforms (Windows), where created_at alone falls
+    # back to random work_id order and breaks queue semantics.
     if state is None:
         cur = db.execute(f"SELECT {_COLUMNS} FROM work_items ORDER BY"
-                         " created_at, work_id")
+                         " rowid")
     else:
         if state not in STATES:
             raise WorkRefused(f"unknown state {state!r}")
         cur = db.execute(f"SELECT {_COLUMNS} FROM work_items WHERE"
-                         " state=? ORDER BY created_at, work_id",
+                         " state=? ORDER BY rowid",
                          (state,))
     return [_row_to_item(r) for r in cur.fetchall()]
 
@@ -168,8 +171,10 @@ def claim_next(db, owner: str, ttl_s: int = DEFAULT_TTL_S) -> dict | None:
     owner = _check_owner(owner)
     _check_ttl(ttl_s)
     while True:
+        # rowid order == insertion (FIFO) order; created_at ties on
+        # coarse-clock platforms, so it must not govern the queue.
         cur = db.execute("SELECT work_id FROM work_items WHERE"
-                         " state='QUEUED' ORDER BY created_at, work_id"
+                         " state='QUEUED' ORDER BY rowid"
                          " LIMIT 1")
         row = cur.fetchone()
         if row is None:
@@ -190,9 +195,11 @@ def reclaim_stale(db, owner: str,
     owner = _check_owner(owner)
     _check_ttl(ttl_s)
     now_epoch = _epoch()
+    # Oldest stale claim first; rowid breaks claimed_at ties
+    # deterministically (coarse clocks stamp ties routinely).
     cur = db.execute("SELECT work_id, owner FROM work_items WHERE"
                      " state='CLAIMED' AND lease_until<=? ORDER BY"
-                     " claimed_at, work_id LIMIT 1", (now_epoch,))
+                     " claimed_at, rowid LIMIT 1", (now_epoch,))
     row = cur.fetchone()
     if row is None:
         return None

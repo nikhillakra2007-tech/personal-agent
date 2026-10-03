@@ -1,0 +1,13 @@
+<html><head><title>Report Shelf — Demo Portal</title></head>
+<body>
+<h1>Monthly report shelf</h1>
+<p>Fetch the current export below.</p>
+<a id="rep" href="#">Download monthly report</a>
+<script>
+var blob = new Blob(['monthly report payload alpha'],
+                    {type: 'text/plain'});
+var a = document.getElementById('rep');
+a.href = URL.createObjectURL(blob);
+a.download = 'monthly-report.txt';
+</script>
+</body></html>

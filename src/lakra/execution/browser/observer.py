@@ -291,12 +291,14 @@ def _norm_label(text: str) -> str:
 def collect_controls(page: Page) -> tuple:
     """Inventory labeled native controls as (label, kind, selector).
 
-    kind is text (fillable input), check (checkbox/radio), or select
-    (native single-select) — the tag is known by which query found it,
-    never by evaluate (banned). Selector is always #id. Omitted
-    outright: password/hidden/submit/button inputs, multi-selects,
-    disabled controls, controls without an id, and controls no label
-    names. Bounded, never raises — degradation is fewer/no controls.
+    kind is text (fillable input), check (checkbox/radio), file
+    (V2-05: file picker — grounded only by the upload road, never by
+    fill; values never travel from page to plan), or select (native
+    single-select) — the tag is known by which query found it, never
+    by evaluate (banned). Selector is always #id. Omitted outright:
+    password/hidden/submit/button inputs, multi-selects, disabled
+    controls, controls without an id, and controls no label names.
+    Bounded, never raises — degradation is fewer/no controls.
     """
     out: list[tuple[str, str, str]] = []
 
@@ -328,7 +330,9 @@ def collect_controls(page: Page) -> tuple:
             itype = (ctrl.get_attribute("type") or "text").lower()
             if itype == "password":
                 continue  # credential fields are never inventoried
-            if itype in CHECKABLE_TYPES:
+            if itype == "file":
+                take(ctrl, cid, "file")
+            elif itype in CHECKABLE_TYPES:
                 take(ctrl, cid, "check")
             elif itype in TEXTUAL_TYPES:
                 take(ctrl, cid, "text")
