@@ -105,6 +105,11 @@ Env/overrides (tests, portability):
       named profiles live under --sessions-dir, default
       var/sessions; names are validated, never paths)
     --sessions-dir PATH: root for named session profiles
+    --headed: run the browser headed (visible window) instead of
+      headless. Visibility only: policy, guards, and approvals are
+      identical. Needed for hosts that bot-wall headless renderers
+      (e.g. Oracle Academy's Akamai edge serves an outage banner to
+      headless Chromium but real content to headed).
     --clear-session-profile NAME: delete one named profile and exit
     --planner deterministic|model: decomposition planner for
       --decompose only (default deterministic; model uses a local
@@ -112,8 +117,8 @@ Env/overrides (tests, portability):
     --model NAME, --model-url URL, --model-timeout-s SECS: local
       model configuration (loopback Ollama only)
     --ram-floor-mb N, --cpu-ceiling PCT: guard pressure floors
-      (defaults 2048 MB / 90 pct, the monitor defaults; lowered only
-      for loaded test boxes, never raised silently)
+      (defaults 512 MB / 90 pct; the floor only trips on genuine
+      near-exhaustion, and --ram-floor-mb 0 disables it entirely)
 """
 
 import json
@@ -180,7 +185,7 @@ def parse_args(argv: list[str]) -> dict:
                    "--sessions-dir", "--clear-session-profile",
                    "--planner", "--model", "--model-url",
                    "--model-timeout-s"}
-    flags = {"--yes", "--no", "--list", "--daemon", "--once"}
+    flags = {"--yes", "--no", "--list", "--daemon", "--once", "--headed"}
     while i < len(argv):
         tok = argv[i]
         if tok in flags:
@@ -336,7 +341,7 @@ class CLIMonitor(ResourceMonitor):
     smoke suite deterministically. Scripts-side only; src/ untouched.
     """
 
-    def __init__(self, ram_floor_mb: int = 2048,
+    def __init__(self, ram_floor_mb: int = 512,
                  cpu_ceiling: float = 90.0) -> None:
         super().__init__()
         self.ram_floor_mb = ram_floor_mb
@@ -350,7 +355,7 @@ class CLIMonitor(ResourceMonitor):
 
 def monitor_for(opts: dict) -> ResourceMonitor:
     try:
-        floor = int(opts.get("ram_floor_mb", 2048))
+        floor = int(opts.get("ram_floor_mb", 512))
     except (TypeError, ValueError):
         raise UsageError("--ram-floor-mb must be an integer")
     try:
@@ -426,6 +431,13 @@ def session_exclusive(opts: dict) -> bool:
     holders never silently merge state. Ephemeral runs stay
     unlocked (V1 behavior identical)."""
     return opts.get("session_profile") is not None
+
+
+def headless_for(opts: dict) -> bool:
+    """Headless unless --headed opted in (hosts that bot-wall headless
+    renderers, e.g. Oracle Academy's Akamai edge). Visibility only:
+    policy, guards, and approvals are identical either way."""
+    return not opts.get("headed")
 
 
 def resolve_model_provider(opts: dict):
@@ -1079,6 +1091,7 @@ def run_resume(argv, opts, audit_path, profile_dir, shots_dir,
         print(f"usage error: {exc}")
         return 1
     sessions = BrowserSessions(_sess_dir,
+                               headless=headless_for(opts),
                                exclusive=session_exclusive(opts))
     db = None
     try:
@@ -1190,6 +1203,7 @@ def run_chain_file(argv, opts, audit_path, profile_dir, shots_dir,
     sessions = BrowserSessions(
         _sess_dir,
         accept_downloads=chain_wants_downloads(legs_hint),
+        headless=headless_for(opts),
         exclusive=session_exclusive(opts))
     db = None
     try:
@@ -1318,6 +1332,7 @@ def run_chain_resume(argv, opts, audit_path, profile_dir, shots_dir,
         return 1
     sessions = BrowserSessions(
         _sess_dir, accept_downloads=chain_wants_downloads(legs),
+        headless=headless_for(opts),
         exclusive=session_exclusive(opts))
     db = None
     try:
@@ -1540,6 +1555,7 @@ def run_decompose(argv, opts, audit_path, profile_dir, shots_dir,
         print(f"usage error: {exc}")
         return 1
     sessions = BrowserSessions(_sess_dir,
+                               headless=headless_for(opts),
                                exclusive=session_exclusive(opts))
     db = None
     try:
@@ -1692,6 +1708,7 @@ def run_daemon(argv, opts, audit_path, profile_dir, shots_dir,
     transfer_root = transfers_dir_for(opts)
     session_key = None
     sessions = BrowserSessions(ephemeral_dir,
+                               headless=headless_for(opts),
                                accept_downloads=want_downloads)
     try:
         sessions.launch()
@@ -1734,6 +1751,7 @@ def run_daemon(argv, opts, audit_path, profile_dir, shots_dir,
                 pass
             fresh = BrowserSessions(
                 target, accept_downloads=want_downloads,
+                headless=headless_for(opts),
                 exclusive=(want is not None))
             try:
                 fresh.launch()
@@ -2015,6 +2033,7 @@ def run_goal(argv, opts, audit_path, profile_dir, shots_dir,
         print(f"usage error: {exc}")
         return 1
     sessions = BrowserSessions(_sess_dir,
+                               headless=headless_for(opts),
                                exclusive=session_exclusive(opts))
     db = None
     try:
@@ -2176,6 +2195,7 @@ def main(argv: list[str]) -> int:
         return 1
     sessions = BrowserSessions(_sess_dir,
                                accept_downloads=(road == "download"),
+                               headless=headless_for(opts),
                                exclusive=session_exclusive(opts))
     db = None
     try:

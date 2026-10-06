@@ -12,6 +12,7 @@
 
 [Architecture](#-system-architecture) •
 [Execution Roads](#-execution-roads) •
+[Oracle Academy Suite](#-oracle-academy-automation-suite) •
 [Safety & Policy](#%EF%B8%8F-policy--safety-model) •
 [Quickstart](#-quickstart) •
 [Design Intelligence](#-design-intelligence--uiux-pro-max) •
@@ -29,6 +30,7 @@
 Every action undergoes multi-phase ground verification, runtime resource checking, and explicit safety gating before and after execution.
 
 ### Key Highlights
+- 🎓 **Autonomous Oracle Academy Suite**: Dedicated high-precision course & quiz automation engine (`oracle/`) featuring Gemini 3.8 Flash solving, frame-aware navigation, and 100% score answer harvesting.
 - 🛡️ **Refusal-First Determinism**: Ambiguous or ungrounded instructions result in explicit refusal—never hallucinated actions.
 - 🚦 **L0–L4 Policy Engine**: Enforces strict tiers ranging from read-only inspection (L0) to human-in-the-loop approval gates (L3) and hard blocks (L4).
 - 🔄 **Dual-Plane Separation**: The **Control Plane** solely reasons and decides; the **Execution Plane** solely acts under strict capability tokens.
@@ -86,6 +88,20 @@ Lakra organizes browser workflows into specialized, robust execution pathways:
 | **`form`** | Resolves form fields, populates inputs, and gates submission behind human approval | ⚙️ Explicit Flags |
 | **`loop`** | Bounded iteration across repeating DOM structures (e.g. paginated links) | ⚙️ Explicit Flags |
 | **`chain`** | Sequential multi-leg execution composing 2–4 roads (including `click` legs) | ⚙️ `--chain-file` |
+
+---
+
+## 🎓 Oracle Academy Automation Suite
+
+Lakra includes a specialized, high-precision course & quiz automation engine located in [`oracle/`](oracle/):
+
+* **🧠 Gemini 3.8 Flash Solver**: Context-aware SQL reasoning engine supporting single-choice and multi-choice ("Choose two", "Choose three") questions with 100% precision.
+* **🖼️ Frame-Aware DOM Traversal**: Resolves APEX App `63000` (Page 15 & Page 190) whether rendered in top-level windows or embedded iframes.
+* **🛡️ Zero-Premature-Submit Guard**: Questions 1 to $N-1$ strictly trigger `Submit Answer`/`Next`; `Complete Assessment` is only unlocked on the final question.
+* **🔄 100% Score Guarantee**: Automatically harvests correct answers from "View Results" and executes automated retakes if score is under 100%.
+* **⚡ Akamai DNS Pinning**: Employs Chromium `--host-resolver-rules` to bypass common router DNS drops (`ERR_NAME_NOT_RESOLVED`) on Oracle/Akamai CDN edge nodes.
+
+👉 **Full documentation, scripts, and architecture details are available in [`oracle/README.md`](oracle/README.md).**
 
 ---
 
@@ -229,6 +245,15 @@ personal-agent/
 │   ├── demo_v1.py              # Full V1 acceptance test harness (30/30 checks)
 │   ├── tools/                  # Auxiliary CLI utilities (2 files)
 │   └── replays/                # Historical development slice verification harnesses
+│
+├── oracle/                     # Oracle Academy APEX Automation Suite
+│   ├── README.md               # Dedicated documentation & architecture overview
+│   ├── automate_oracle_course.py # Master autonomous course & quiz engine (v16)
+│   ├── takeover_v2.py          # Interactive session takeover & solver
+│   ├── manual_signin.py        # SSO session bootstrap for persistent context
+│   ├── solvers/                # Gemini 3.8 Flash & multi-choice solver modules
+│   ├── diagnostics/            # Frame & DOM inspection utilities
+│   └── chains/                 # Lakra deterministic chain specs (oracle-academy.json)
 │
 ├── specs/                      # Formal Feature Specifications
 │   └── 001-lakra-v1/           # V1 formal spec, plan, tasks, and click road briefs

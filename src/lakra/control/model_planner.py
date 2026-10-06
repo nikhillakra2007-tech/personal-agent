@@ -93,7 +93,7 @@ PROMPT_TEMPLATE = (
     ' {{"version": 1, "steps": [{{"road": ..., ...}}],'
     ' "metadata": {{}}}}.'
     f" Rules: 2 to {MAX_MODEL_LEGS} flat steps, no nesting except"
-    ' "query": {"text": ...}; each step has exactly "road" plus that'
+    ' "query": {{"text": ...}}; each step has exactly "road" plus that'
     " road's fields. Allowed roads/fields:"
     " observe(url, expect_text); follow(list_url, goal_text,"
     " body_expect); click(click_url, click_text, expect_text);"
@@ -305,6 +305,11 @@ def plan_with_model(prose: str, provider,
     context = context or PlannerContext(goal=prose)
     attempt = ModelPlanAttempt(provider=getattr(provider, "name", "?"))
     _check_prose(prose)
+    if not _goal_urls(prose):
+        raise ModelPlanRejected(
+            "no page addresses in goal: the model may only repeat"
+            " caller-stated URLs, so there is nothing legal to propose;"
+            " deterministic fallback decides")
     attempts = max(1, min(int(context.max_attempts or 1),
                           MAX_PLANNING_ATTEMPTS))
     prompt = build_prompt(prose)

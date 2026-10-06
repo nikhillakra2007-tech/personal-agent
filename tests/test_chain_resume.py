@@ -235,10 +235,11 @@ def fake_browser(monkeypatch):
 
     class FakeSessions:
         def __init__(self, profile_dir, accept_downloads=False,
-                     exclusive=False):
+                     exclusive=False, headless=True):
             self.profile_dir = profile_dir
             self.accept_downloads = accept_downloads
             self.exclusive = exclusive
+            self.headless = headless
             self.page = FakePage()
             self.launches = 0
             instances.append(self)
@@ -912,7 +913,7 @@ def test_bare_resume_refuses_chain_task_read_only(
 
     class NoBrowser:
         def __init__(self, profile_dir, accept_downloads=False,
-                     exclusive=False):
+                     exclusive=False, headless=True):
             pass
 
         def launch(self):
@@ -962,7 +963,7 @@ def test_bare_resume_non_chain_task_passes_guard(
 
     class NoBrowser:
         def __init__(self, profile_dir, accept_downloads=False,
-                     exclusive=False):
+                     exclusive=False, headless=True):
             pass
 
         def launch(self):

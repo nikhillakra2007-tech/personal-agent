@@ -123,7 +123,7 @@ def test_shaper_allow_domain_repeatable():
 def test_monitor_for_defaults_and_bad_values():
     from lakra_do import monitor_for
     mon = monitor_for({"allow_domains": []})
-    assert (mon.ram_floor_mb, mon.cpu_ceiling) == (2048, 90.0)
+    assert (mon.ram_floor_mb, mon.cpu_ceiling) == (512, 90.0)
     mon = monitor_for({"allow_domains": [], "ram_floor_mb": "0",
                        "cpu_ceiling": "100"})
     assert (mon.ram_floor_mb, mon.cpu_ceiling) == (0, 100.0)
@@ -170,3 +170,11 @@ def test_cli_no_road_exit_1_usage(tmp_path):
     proc = run_cli(tmp_path, "--url", LOOP_INDEX)
     assert proc.returncode == 1
     assert "usage error" in proc.stdout
+
+
+def test_parse_headed_flag_and_headless_default():
+    assert parse_args(["--headed"])["headed"] is True
+    assert "headed" not in parse_args([])
+    assert lakra_do.headless_for({"allow_domains": []}) is True
+    assert lakra_do.headless_for({"allow_domains": [],
+                                 "headed": True}) is False

@@ -1,0 +1,24 @@
+{
+  "legs": [
+    {
+      "road": "observe",
+      "url": "https://www.oracle.com/in/education/",
+      "expect_text": "Oracle University"
+    },
+    {
+      "road": "observe",
+      "url": "https://academy.oracle.com/pls/f?p=63000:100:405864089372249:::100::&cs=3q6Xlcg6OEVNW4rcLCkRlr4wOrGFcnKdBj6OPGG4WVrDCOWcUlJMtn1F4Zodxr-LjYdIEXGqOq7wNAODhCGstCg",
+      "expect_text": "Oracle Academy"
+    },
+    {
+      "road": "observe",
+      "url": "https://academy.oracle.com/pls/f?p=63000:15:408416021490716::::P15_ID,P15_CC",
+      "expect_text": "Oracle Academy"
+    },
+    {
+      "road": "observe",
+      "url": "https://academy.oracle.com/pls/f?p=63000:15:408416021490716::::P15_ID,P15_CC",
+      "expect_text": "Take an Assessment"
+    }
+  ]
+}

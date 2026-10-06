@@ -1,0 +1,19 @@
+{
+  "legs": [
+    {
+      "road": "observe",
+      "url": "https://signon.oracle.com/signin",
+      "expect_text": "Create Account"
+    },
+    {
+      "road": "observe",
+      "url": "https://www.oracle.com/in/education/",
+      "expect_text": "Oracle University"
+    },
+    {
+      "road": "observe",
+      "url": "https://academy.oracle.com/en/oa-web-overview.html",
+      "expect_text": "Oracle Academy"
+    }
+  ]
+}

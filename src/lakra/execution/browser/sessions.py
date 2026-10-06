@@ -1,8 +1,11 @@
 """Slice-04: isolated browser sessions (read-only slice).
 
 Exactly one persistent Chromium context rooted at a Lakra-owned profile
-directory — never the user's Chrome/Edge profile. Headless only. No typing,
-no clicking, no downloads (accept_downloads=False).
+directory — never the user's Chrome/Edge profile. Headless by default
+(no typing, no clicking, no downloads (accept_downloads=False));
+opt-in headed (headless=False) for hosts that bot-wall headless
+renderers. The flag alone changes visibility, never policy: every
+action still routes through the same guards/router/approvals.
 
 V2-05: an explicit opt-in (accept_downloads=True, only for executions
 that may run a sanctioned browser.download action) lets the context
@@ -71,13 +74,43 @@ class BrowserSessions:
 
     LOCK_FILENAME = ".lakra-profile.lock"
 
+    # Hosts whose DNS flaps inside Chromium (router SERVFAILs
+    # under its parallel A/AAAA bursts) while the OS resolver answers
+    # fine. Resolved via the OS at launch and pinned with
+    # --host-resolver-rules so the renderer never consults the broken
+    # path. Best-effort: unresolvable hosts are skipped, never fatal.
+    DNS_PIN_HOSTS = (
+        "signon.oracle.com",
+        "academy.oracle.com",
+        "www.oracle.com",
+        "education.oracle.com",
+        "login-ext.identity.oraclecloud.com",
+    )
+
+    @staticmethod
+    def _dns_pin_args() -> list[str]:
+        import socket
+        rules = []
+        for host in BrowserSessions.DNS_PIN_HOSTS:
+            try:
+                ip = socket.getaddrinfo(host, 443, family=socket.AF_INET,
+                                        type=socket.SOCK_STREAM)[0][4][0]
+            except OSError:
+                continue
+            rules.append(f"MAP {host} {ip}")
+        if not rules:
+            return []
+        return ["--host-resolver-rules=" + ",".join(rules)]
+
     def __init__(self, profile_dir: str | Path,
                  accept_downloads: bool = False,
-                 exclusive: bool = False) -> None:
+                 exclusive: bool = False,
+                 headless: bool = True) -> None:
         self.profile_dir = Path(profile_dir)
         self.profile_dir.mkdir(parents=True, exist_ok=True)
         self.accept_downloads = bool(accept_downloads)
         self.exclusive = bool(exclusive)
+        self.headless = bool(headless)
         self._context: BrowserContext | None = None
         self._closed = False
         self._holds_driver = False
@@ -138,8 +171,9 @@ class BrowserSessions:
         try:
             self._context = BrowserSessions._shared_pw.chromium.launch_persistent_context(
                 str(self.profile_dir),
-                headless=True,
+                headless=self.headless,
                 accept_downloads=self.accept_downloads,
+                args=self._dns_pin_args(),
             )
         except Exception:
             self._release_driver()
@@ -157,8 +191,104 @@ class BrowserSessions:
         # the renderer's agent host ready, which domcontentloaded does not
         # guarantee after an idle gap (found via resume-flow flake, slice-11).
         page = self._require_context().new_page()
-        page.goto(url, wait_until="load", timeout=timeout_ms)
+        self._goto_with_dns_retry(page, url, timeout_ms)
+        self._settle_redirects(page)
+        # Post-load SSO bounces (academy -> login-ext -> back) can
+        # strand on a DNS error page even when the initial goto was
+        # clean. A stranded error page is never a real arrival: redo
+        # the whole navigation bounded, then return whatever settled.
+        for _ in range(2):
+            try:
+                if not page.url.startswith("chrome-error://"):
+                    break
+            except Exception:
+                break
+            self._goto_with_dns_retry(page, url, timeout_ms)
+            self._settle_redirects(page)
+        self._await_content(page)
         return page
+
+    @staticmethod
+    def _await_content(page: Page, timeout_ms: int = 20000) -> None:
+        """Wait for the settled page to actually render body text.
+
+        SSO-fronted pages (Oracle Academy) sit on the right URL with
+        an EMPTY body while the identity bounce completes; snapshotting
+        then yields nothing and text_contains fails on content that
+        arrives seconds later. Polls body.inner_text until non-empty,
+        capped at timeout_ms, then returns regardless — verification
+        still judges the result. Fail-open: unreadable pages return
+        immediately for the normal error path."""
+        import time
+        deadline = time.monotonic() + timeout_ms / 1000.0
+        while time.monotonic() < deadline:
+            try:
+                if (page.locator("body").inner_text(timeout=1000) or "") \
+                        .strip():
+                    return
+            except Exception:
+                return
+            time.sleep(0.5)
+
+    @staticmethod
+    def _goto_with_dns_retry(page: Page, url: str, timeout_ms: int,
+                             attempts: int = 5) -> None:
+        """Bounded re-goto on transient Chromium DNS failures.
+
+        Fresh Chromium renderers on this fleet intermittently report
+        ERR_NAME_NOT_RESOLVED / DNS_PROBE_STARTED for hosts the OS
+        resolves fine (Oracle SSO edge); a plain re-goto recovers.
+        Only DNS-shaped errors retry (same error text Playwright
+        surfaces); anything else raises immediately. Last attempt
+        always raises so navigation failure stays fail-closed and
+        the normal EXECUTION_FAILED + verification path decides."""
+        last = None
+        for n in range(max(1, attempts)):
+            try:
+                page.goto(url, wait_until="load", timeout=timeout_ms)
+                return
+            except Exception as exc:
+                last = exc
+                msg = str(exc)
+                if ("ERR_NAME_NOT_RESOLVED" not in msg
+                        and "DNS_PROBE" not in msg):
+                    raise
+                if n == attempts - 1:
+                    raise
+        raise last  # pragma: no cover - loop always returns/raises
+
+    @staticmethod
+    def _settle_redirects(page: Page, stable_ms: int = 2500,
+                           timeout_ms: int = 20000) -> None:
+        """Wait for post-load redirect chains (SSO dances, geo-redirects)
+        redirect chains (SSO dances, geo-redirects) to finish, not
+        merely to pause: Oracle's signon page bounces to
+        login-ext.identity.oraclecloud.com ~1-3s AFTER load and returns
+        ~2s later, so a sub-second window straddles the dance and the
+        exact url_is predicate fails on the transient URL. Capped at
+        timeout_ms — then returns regardless. Never passes/fails
+        anything itself: url_is and text_contains still verify the
+        settled page exactly as before. Fail-open by design: a
+        closed/unreadable page just returns and lets the normal action
+        error + verification path handle it."""
+        import time
+        try:
+            last = page.url
+        except Exception:
+            return
+        stable_since = time.monotonic()
+        deadline = stable_since + timeout_ms / 1000.0
+        while time.monotonic() < deadline:
+            time.sleep(0.25)
+            try:
+                cur = page.url
+            except Exception:
+                return
+            now = time.monotonic()
+            if cur != last:
+                last, stable_since = cur, now
+            elif (now - stable_since) * 1000.0 >= stable_ms:
+                return
 
     def _release_driver(self) -> None:
         if self._holds_driver:

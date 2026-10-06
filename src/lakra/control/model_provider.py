@@ -36,6 +36,8 @@ def build_provider(spec: str = "", *, timeout_s: int = 60,
     text = spec.strip()
     if text.startswith("ollama:"):
         text = text[len("ollama:"):]
+    elif text.startswith("ollama/"):
+        text = text[len("ollama/"):]
     if "@" in text:
         model, _, url = text.partition("@")
         base_url = url.strip() or base_url

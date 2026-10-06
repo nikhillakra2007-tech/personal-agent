@@ -77,3 +77,49 @@ def test_close_releases_processes(tmp_path):
     assert _browser_procs() >= before
     s.close()
     assert _browser_procs() == before
+
+
+def _fake_driver(monkeypatch, seen):
+    class FakeChromium:
+        def launch_persistent_context(self, profile_dir, **kw):
+            seen.update(kw)
+            seen["profile_dir"] = profile_dir
+
+            class Ctx:
+                def close(self):
+                    pass
+
+            return Ctx()
+
+    class FakePW:
+        chromium = FakeChromium()
+
+        def stop(self):
+            pass
+
+    monkeypatch.setattr(BrowserSessions, "_shared_pw", FakePW())
+    monkeypatch.setattr(BrowserSessions, "_users", 0)
+
+
+def test_headless_defaults_true(tmp_path, monkeypatch):
+    seen = {}
+    _fake_driver(monkeypatch, seen)
+    s = BrowserSessions(tmp_path / "p")
+    assert s.headless is True
+    try:
+        s.launch()
+    finally:
+        s.close()
+    assert seen.get("headless") is True
+
+
+def test_headed_opt_in_passes_false(tmp_path, monkeypatch):
+    seen = {}
+    _fake_driver(monkeypatch, seen)
+    s = BrowserSessions(tmp_path / "p", headless=False)
+    assert s.headless is False
+    try:
+        s.launch()
+    finally:
+        s.close()
+    assert seen.get("headless") is False
