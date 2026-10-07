@@ -330,7 +330,7 @@ def run_page_190_quiz_solver(page: Page, quiz_title: str):
     print(f"=======================================================")
 
     question_idx = 1
-    max_questions = 60
+    max_questions = 75
 
     while question_idx <= max_questions:
         time.sleep(2)
@@ -368,20 +368,49 @@ def run_page_190_quiz_solver(page: Page, quiz_title: str):
 
         print(f"\n>>> [{q_num}] <<<")
 
-        # 5. EXTRACT CHOICES FROM TARGET FRAME
+        # 5. EXTRACT CHOICES FROM TARGET FRAME (SUPPORT MULTI-LINE & DIRECT INPUTS)
         choices = target.evaluate("""() => {
+            const blacklist = [
+                'instructions', 'true or false?', 'choices - just one correct!', 
+                'choices - mark all that apply!', 'exit', 'previous question', 
+                'submit answer', 'complete assessment', 'error has occurred', 
+                'errors have occurred', 'at least one choice must be selected'
+            ];
+
+            // 1. Direct radio / checkbox inputs
+            const inps = Array.from(document.querySelectorAll("input[type='radio'], input[type='checkbox']"));
+            if (inps.length > 0) {
+                const results = [];
+                inps.forEach(inp => {
+                    let labelText = '';
+                    if (inp.id) {
+                        const l = document.querySelector(`label[for="${inp.id}"]`);
+                        if (l) labelText = (l.innerText || l.textContent || '').trim();
+                    }
+                    if (!labelText) {
+                        const opt = inp.closest('.apex-item-option, label, [role="radio"], [role="checkbox"]');
+                        if (opt) labelText = (opt.innerText || opt.textContent || '').trim();
+                    }
+                    if (!labelText && inp.parentElement) {
+                        labelText = (inp.parentElement.innerText || inp.parentElement.textContent || '').trim();
+                    }
+                    if (labelText && !results.includes(labelText)) {
+                        const low = labelText.toLowerCase();
+                        if (!blacklist.some(b => low.startsWith(b) || low === b)) {
+                            results.push(labelText);
+                        }
+                    }
+                });
+                if (results.length > 0) return results;
+            }
+
+            // 2. Direct labels without length cutoff
             const labels = Array.from(document.querySelectorAll("label, .apex-item-option, [role='checkbox'], [role='radio']"));
             const items = [];
             labels.forEach(l => {
                 const txt = (l.innerText || l.textContent || '').trim();
-                if (txt && txt.length > 0 && txt.length < 350 && !items.includes(txt)) {
+                if (txt && !items.includes(txt)) {
                     const lower = txt.toLowerCase();
-                    const blacklist = [
-                        'instructions', 'true or false?', 'choices - just one correct!', 
-                        'choices - mark all that apply!', 'exit', 'previous question', 
-                        'submit answer', 'complete assessment', 'error has occurred', 
-                        'errors have occurred', 'at least one choice must be selected'
-                    ];
                     if (!blacklist.some(b => lower.startsWith(b) || lower === b)) {
                         items.push(txt);
                     }
@@ -389,15 +418,6 @@ def run_page_190_quiz_solver(page: Page, quiz_title: str):
             });
             return items;
         }""")
-
-        if not choices:
-            choices = target.evaluate("""() => {
-                const inputs = Array.from(document.querySelectorAll("input[type='radio'], input[type='checkbox']"));
-                return inputs.map(i => {
-                    const l = document.querySelector(`label[for="${i.id}"]`) || i.closest('label');
-                    return l ? (l.innerText || '').trim() : '';
-                }).filter(t => t.length > 0);
-            }""")
 
         # 6. EXTRACT QUESTION PROMPT
         q_prompt = target.evaluate("""() => {
@@ -417,6 +437,24 @@ def run_page_190_quiz_solver(page: Page, quiz_title: str):
 
         print(f"Question: {q_prompt[:95]}...")
         print(f"Choices: {choices}")
+
+        if not choices:
+            body = target.locator("body").inner_text() or ""
+            if any(w in body.lower() for w in ("score", "grade", "passed", "completed", "review")):
+                print("[QUIZ] Completion screen detected")
+                break
+            if "63000:192" in page.url or page.locator("text=/Percentage\\s+Scored/i").count() > 0:
+                print("[QUIZ] Reached score summary page 192")
+                break
+            print(f"[QUIZ] No choices extracted on {q_num} — clicking Submit Answer to advance")
+            for ctx in [target, page]:
+                btn = ctx.locator("button:has-text('Submit Answer'), a.t-Button:has-text('Submit Answer')").first
+                if btn.count() > 0 and btn.is_visible():
+                    btn.click(force=True)
+                    break
+            time.sleep(3)
+            question_idx += 1
+            continue
 
         # 7. DETERMINE MULTI-SELECT VS SINGLE-SELECT
         input_types = target.evaluate("""() => {
@@ -526,131 +564,149 @@ def run_page_190_quiz_solver(page: Page, quiz_title: str):
         m_q = re.search(r"Question\s+(\d+)\s+of\s+(\d+)", q_num, re.IGNORECASE)
         if not m_q:
             m_q = re.search(r"Question\s+(\d+)\s+of\s+(\d+)", q_prompt, re.IGNORECASE)
-        if m_q and int(m_q.group(1)) == int(m_q.group(2)):
-            is_q_final = True
-        elif "15 of 15" in q_num.lower() or "15 of 15" in q_prompt.lower():
-            is_q_final = True
-
-        if not is_q_final:
+        if not m_q:
             try:
-                has_comp = target.evaluate("""() => {
-                    const btns = Array.from(document.querySelectorAll("button, input[type='button'], a.t-Button"));
-                    return btns.some(b => (b.innerText || b.value || '').toLowerCase().includes('complete assessment') && !b.disabled);
+                found_txt = target.evaluate("""() => {
+                    const all = Array.from(document.querySelectorAll('*'));
+                    const match = all.find(el => el.children.length === 0 &&
+                        /Question\\s+\\d+\\s+of\\s+\\d+/i.test((el.innerText || '').trim()));
+                    return match ? match.innerText.trim() : '';
                 }""")
-                if has_comp:
-                    is_q_final = True
+                if found_txt:
+                    m_q = re.search(r"Question\s+(\d+)\s+of\s+(\d+)", found_txt, re.IGNORECASE)
             except Exception:
                 pass
 
+        if m_q:
+            cur_q = int(m_q.group(1))
+            total_q = int(m_q.group(2))
+            is_q_final = (cur_q >= total_q)
+            print(f"[QUESTION PROGRESS] Question {cur_q} of {total_q} (is_final={is_q_final})")
+        else:
+            is_q_final = False
+
         if is_q_final:
             print(f"[ACTION] Final Question reached ({q_num}). Submitting with Complete Assessment...")
-            sub_btn = target.locator("button, a.t-Button, input[type='button']").filter(
-                has_text=re.compile(r"^\s*(Complete Assessment|Finish Assessment)\s*$", re.I)
-            ).last
-            if sub_btn.count() > 0 and sub_btn.is_visible():
-                sub_btn.click(force=True)
-            else:
-                target.evaluate("""() => {
-                    const btns = Array.from(document.querySelectorAll("button, input[type='button'], a.t-Button"));
-                    const b = btns.find(x => (x.innerText || x.value || '').toLowerCase().includes('complete assessment') && !x.disabled);
-                    if (b) b.click();
-                }""")
+            comp_patterns = [r"^\s*(Complete Assessment|Finish Assessment|Complete|Finish)\s*$"]
+            clicked_comp = False
+            for ctx in [target, page]:
+                for pat in comp_patterns:
+                    try:
+                        btn = ctx.locator("button, a.t-Button, input[type='button'], input[type='submit']").filter(
+                            has_text=re.compile(pat, re.I)
+                        ).first
+                        if btn.count() > 0 and btn.is_visible():
+                            btn.click(force=True, timeout=3000)
+                            clicked_comp = True
+                            break
+                    except Exception:
+                        pass
+                if clicked_comp:
+                    break
+
+            if not clicked_comp:
+                for ctx in [target, page]:
+                    try:
+                        clicked = ctx.evaluate("""() => {
+                            const els = Array.from(document.querySelectorAll(
+                                'button, a.t-Button, input[type="button"], input[type="submit"], [role="button"]'
+                            ));
+                            const b = els.find(x => {
+                                const t = (x.innerText || x.value || x.textContent || '').trim().toLowerCase();
+                                return (t.includes('complete assessment') || t.includes('finish assessment') ||
+                                        t === 'complete' || t === 'finish') &&
+                                       !x.disabled && !x.classList.contains('is-disabled');
+                            });
+                            if (b) { b.click(); return true; }
+                            return false;
+                        }""")
+                        if clicked:
+                            break
+                    except Exception:
+                        pass
 
             time.sleep(2)
 
-            # Confirm modal dialog specifically for Question 15
-            for _ in range(5):
+            # Confirm modal dialog for final question
+            for _ in range(8):
                 modal_confirmed = page.evaluate("""() => {
-                    const dialog = document.querySelector('.ui-dialog, [role="dialog"], .t-DialogRegion');
-                    if (dialog && dialog.offsetHeight > 0) {
-                        const btns = Array.from(dialog.querySelectorAll('button, a.t-Button, input[type="button"]'));
-                        const compBtn = btns.find(b => {
-                            const t = (b.innerText || b.value || '').trim().toLowerCase();
-                            return (t.includes('complete assessment') || t.includes('yes') || t.includes('ok')) && !b.disabled;
-                        });
-                        if (compBtn) {
-                            compBtn.click();
-                            return compBtn.innerText || 'Complete Assessment';
+                    const dialogs = Array.from(document.querySelectorAll(
+                        '.ui-dialog, [role="dialog"], .t-DialogRegion, .ui-widget-content'));
+                    for (const dialog of dialogs) {
+                        if (dialog.offsetHeight > 0) {
+                            const btns = Array.from(dialog.querySelectorAll(
+                                'button, a.t-Button, input[type="button"]'));
+                            const compBtn = btns.find(b => {
+                                const t = (b.innerText || b.value || '').trim().toLowerCase();
+                                return (t.includes('complete assessment') ||
+                                        t.includes('finish assessment') ||
+                                        t === 'yes' || t === 'ok' ||
+                                        t === 'submit') && !b.disabled;
+                            });
+                            if (compBtn) { compBtn.click(); return compBtn.innerText || 'Complete Assessment'; }
                         }
                     }
                     return null;
                 }""")
                 if modal_confirmed:
                     print(f"[MODAL CONFIRMED] Clicked '{modal_confirmed}' in confirmation modal dialog!")
-                    time.sleep(4)
-                    break
-
-                modal_loc = page.locator(".ui-dialog button:has-text('Complete Assessment'), [role='dialog'] button:has-text('Complete Assessment'), .ui-dialog .t-Button--hot").last
-                if modal_loc.count() > 0 and modal_loc.is_visible():
-                    print(f"[MODAL CONFIRMED] Clicked modal button via locator: '{modal_loc.inner_text().strip()}'")
-                    modal_loc.click(force=True)
-                    time.sleep(4)
+                    time.sleep(5)
                     break
                 time.sleep(1)
+            break
 
         else:
-            # Questions 1 through N-1: Submit Answer / Next Question
+            # Questions 1 through N-1: Submit Answer / Next Question ONLY
             print(f"[ACTION] Advancing ({q_num}). Submitting with 'Submit Answer'...")
+            sub_patterns = [r"^\s*(Submit Answer|Submit|Next Question|Next)\s*$"]
             submitted = False
 
-            contexts = [page, target] + [f for f in page.frames if f not in (page, target)]
-            for ctx in contexts:
-                for lbl in ["Submit Answer", "Next Question", "Submit"]:
-                    for sel in [
-                        f"button:has-text('{lbl}')",
-                        f"a:has-text('{lbl}')",
-                        f".t-Button:has-text('{lbl}')",
-                        f"[role='button']:has-text('{lbl}')",
-                        f"input[value*='{lbl}']",
-                    ]:
-                        try:
-                            loc = ctx.locator(sel).first
-                            if loc.count() > 0 and loc.is_visible():
-                                box = loc.bounding_box()
-                                if box:
-                                    page.mouse.click(box["x"] + box["width"] / 2, box["y"] + box["height"] / 2)
-                                    time.sleep(0.3)
-                                loc.click(force=True, timeout=2000)
-                                submitted = True
-                                break
-                        except Exception:
-                            pass
-                    if submitted:
-                        break
+            for ctx in [target, page]:
+                for pat in sub_patterns:
+                    try:
+                        btn = ctx.locator("button, a.t-Button, input[type='button'], input[type='submit']").filter(
+                            has_text=re.compile(pat, re.I)
+                        ).first
+                        if btn.count() > 0 and btn.is_visible():
+                            btn.click(force=True, timeout=3000)
+                            submitted = True
+                            break
+                    except Exception:
+                        pass
                 if submitted:
                     break
 
             if not submitted:
-                for ctx in contexts:
+                for ctx in [target, page]:
                     try:
-                        ctx.evaluate("""() => {
-                            const btns = Array.from(document.querySelectorAll("button, input[type='button'], a.t-Button, [role='button']"));
-                            const b = btns.find(x => {
-                                const t = (x.innerText || x.value || '').toLowerCase().trim();
-                                return (t.includes('submit answer') || t === 'submit' || t.includes('next question')) && !x.disabled;
+                        clicked = ctx.evaluate("""() => {
+                            const els = Array.from(document.querySelectorAll(
+                                'button, a.t-Button, input[type="button"], input[type="submit"], [role="button"]'
+                            ));
+                            const b = els.find(x => {
+                                const t = (x.innerText || x.value || x.textContent || '').trim().toLowerCase();
+                                return (t === 'submit answer' || t === 'submit' ||
+                                        t === 'next question' || t === 'next') &&
+                                       !x.disabled && !x.classList.contains('is-disabled');
                             });
-                            if (b) {
-                                b.focus();
-                                b.click();
-                                ['pointerdown', 'mousedown', 'pointerup', 'mouseup', 'click'].forEach(evt => {
-                                    b.dispatchEvent(new MouseEvent(evt, { bubbles: true, cancelable: true, view: window }));
-                                });
-                            } else if (window.apex && typeof apex.submit === 'function') {
-                                apex.submit('SUBMIT_ANSWER');
-                            }
+                            if (b) { b.click(); return true; }
+                            return false;
                         }""")
+                        if clicked:
+                            submitted = True
+                            break
                     except Exception:
                         pass
 
-            # Wait for next question or page update with active re-triggering
+            # Wait for next question or score page
             advanced = False
-            for wait_sec in range(10):
+            for wait_sec in range(8):
                 time.sleep(1)
                 try:
-                    if "63000:192" in page.url:
+                    if "63000:192" in page.url or "percentage" in (page.title() or "").lower():
                         advanced = True
                         break
-                    
+
                     q_after = None
                     for ctx in [target, page]:
                         try:
@@ -669,23 +725,31 @@ def run_page_190_quiz_solver(page: Page, quiz_title: str):
                         print(f"[ADVANCED] Moved from {q_num} -> {q_after}")
                         advanced = True
                         break
-
-                    if wait_sec in (2, 4, 6):
-                        print(f"[RETRY SUBMIT] Re-triggering Submit Answer (sec={wait_sec})...")
-                        for ctx in contexts:
-                            try:
-                                ctx.evaluate("""() => {
-                                    const b = Array.from(document.querySelectorAll("button, a.t-Button")).find(x =>
-                                        (x.innerText || '').toLowerCase().includes('submit answer'));
-                                    if (b) b.click();
-                                    else if (window.apex) apex.submit('SUBMIT_ANSWER');
-                                }""")
-                            except Exception:
-                                pass
                 except Exception:
-                    time.sleep(2)
-                    advanced = True
-                    break
+                    pass
+
+            if not advanced:
+                print(f"[RETRY SUBMIT] Still on {q_num} — clicking Submit Answer again...")
+                for ctx in [target, page]:
+                    try:
+                        clicked = ctx.evaluate("""() => {
+                            const els = Array.from(document.querySelectorAll(
+                                'button, a.t-Button, input[type="button"], input[type="submit"], [role="button"]'
+                            ));
+                            const b = els.find(x => {
+                                const t = (x.innerText || x.value || x.textContent || '').trim().toLowerCase();
+                                return (t === 'submit answer' || t === 'submit' ||
+                                        t === 'next question' || t === 'next') &&
+                                       !x.disabled && !x.classList.contains('is-disabled');
+                            });
+                            if (b) { b.click(); return true; }
+                            return false;
+                        }""")
+                        if clicked:
+                            break
+                    except Exception:
+                        pass
+                time.sleep(3)
 
             question_idx += 1
 
@@ -832,24 +896,31 @@ def handle_page_100_my_classes(page: Page) -> bool:
 
 
 def handle_page_14_outline(page: Page) -> bool:
-    """Automatically finds and enters the next incomplete section/quiz from Course Outline."""
-    print("[PAGE 14] Scanning Course Outline for next incomplete section...")
+    """Automatically finds and enters the next incomplete section/quiz/midterm/final exam from Course Outline."""
+    print("[PAGE 14] Scanning Course Outline for next incomplete assessment...")
     time.sleep(3)
 
     clicked_quiz = page.evaluate("""() => {
-        // Step 1: Scan all course outline rows/cards for incomplete quizzes/sections
+        const isAssessmentText = (t) => {
+            const low = (t || '').toLowerCase();
+            return low.includes('quiz') || low.includes('midterm') ||
+                   low.includes('final exam') || low.includes('final examination') ||
+                   low.includes('exam') || low.includes('test:');
+        };
+
+        // Step 1: Scan all course outline rows/cards for incomplete quizzes/exams
         const containers = Array.from(document.querySelectorAll('tr, .a-CardView-item, .t-Card, li, .t-TreeNav-item, .t-Region'));
         for (const c of containers) {
-            const text = (c.innerText || '').toLowerCase();
-            const hasSectionOrQuiz = /section\\s*\\d+/i.test(text) || /quiz\\s*:\\s*dp/i.test(text);
-            if (hasSectionOrQuiz) {
-                const isDone = text.includes('100%') || 
-                               text.includes('mastery achieved') ||
-                               text.includes('passed') || 
+            const text = (c.innerText || '').trim();
+            if (isAssessmentText(text)) {
+                const isDone = text.toLowerCase().includes('100%') || 
+                               text.toLowerCase().includes('mastery achieved') ||
+                               text.toLowerCase().includes('passed') || 
                                c.querySelector('.u-success, .fa-check, [aria-label*="Complete"], [title*="Complete"]') !== null;
                 if (!isDone) {
                     const link = c.querySelector('a') || (c.tagName === 'A' ? c : null);
                     if (link) {
+                        if (link.scrollIntoViewIfNeeded) link.scrollIntoViewIfNeeded();
                         link.click();
                         return (link.innerText || c.innerText || '').trim().split('\\n')[0];
                     }
@@ -857,28 +928,25 @@ def handle_page_14_outline(page: Page) -> bool:
             }
         }
 
-        // Step 2: Sequential fallback scan from Section 1 to 25
-        for (let s = 1; s <= 25; s++) {
-            const links = Array.from(document.querySelectorAll('a')).filter(a => {
-                const t = (a.innerText || '').trim();
-                return new RegExp(`^Section\\\\s*${s}\\\\b`, 'i').test(t) || 
-                       new RegExp(`Section\\\\s*${s}\\\\s*:`, 'i').test(t) ||
-                       new RegExp(`Quiz\\\\s*:\\s*DP\\\\s*-\\\\s*Section\\\\s*${s}\\\\b`, 'i').test(t);
-            });
-            for (const l of links) {
-                const parent = l.closest('tr') || l.closest('li') || l.closest('.t-Card') || l.parentElement;
-                const fullText = (parent ? parent.innerText : l.innerText).toLowerCase();
-                if (!fullText.includes('100%') && !fullText.includes('passed')) {
-                    l.click();
-                    return l.innerText.trim();
-                }
+        // Step 2: Fallback scan all anchor tags
+        const links = Array.from(document.querySelectorAll('a')).filter(a => {
+            const t = (a.innerText || a.textContent || '').trim();
+            return isAssessmentText(t);
+        });
+        for (const l of links) {
+            const parent = l.closest('tr, li, .t-TreeNav-item, .a-CardView-item, .t-Card');
+            const fullText = (parent ? parent.innerText : l.innerText).toLowerCase();
+            if (!fullText.includes('100%') && !fullText.includes('passed') && !fullText.includes('mastery achieved')) {
+                if (l.scrollIntoViewIfNeeded) l.scrollIntoViewIfNeeded();
+                l.click();
+                return l.innerText.trim();
             }
         }
         return null;
     }""")
 
     if clicked_quiz:
-        print(f"[PAGE 14] Automatically Selected Incomplete Section/Quiz: '{clicked_quiz}'")
+        print(f"[PAGE 14] Automatically Selected Incomplete Assessment: '{clicked_quiz}'")
         time.sleep(4)
         return True
 
@@ -977,24 +1045,15 @@ def run_master_automation():
                         handle_page_192_score_summary(page, f"Quiz_{cycle}")
                         continue
 
-                    # STRICT STATE 2: Assessment question page
+                    # STRICT STATE 2: Assessment question page (190)
                     target = get_quiz_target(page)
-                    has_question = False
-                    try:
-                        has_question = (
-                            "p=63000:190" in curr_url or 
-                            "take the assessment" in title.lower() or 
-                            target.locator("text=/Question\\s+\\d+\\s+of\\s+\\d+/i").count() > 0
-                        )
-                    except Exception:
-                        pass
-
-                    if has_question:
+                    is_quiz_p190 = ("p=63000:190" in curr_url) or (target != page and "63000:190" in target.url)
+                    if is_quiz_p190:
                         run_page_190_quiz_solver(page, f"Quiz_{cycle}")
                         continue
 
-                    # STATE 3: Lesson page (15)
-                    if "p=63000:15" in curr_url or "class course lesson" in title.lower():
+                    # STATE 3: Lesson / Assessment Landing page (15)
+                    if "p=63000:15" in curr_url or "class course lesson" in title.lower() or "take the assessment" in title.lower():
                         handle_page_15_lesson(page)
                         continue
 

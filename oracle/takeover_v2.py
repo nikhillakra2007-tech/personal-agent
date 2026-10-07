@@ -308,56 +308,129 @@ def solve_with_gemini(question: str, choices: list[str], num_to_choose: int = 1)
     return list(range(min(num_to_choose, len(choices))))
 
 
-def extract_choices(target) -> list[str]:
-    choices = target.evaluate("""() => {
-        const labels = Array.from(document.querySelectorAll(
-            "label, .apex-item-option, [role='checkbox'], [role='radio']"));
-        const items = [];
-        const blacklist = [
-            'instructions', 'true or false?', 'choices - just one correct!',
-            'choices - mark all that apply!', 'exit', 'previous question',
-            'submit answer', 'complete assessment', 'error has occurred',
-            'errors have occurred', 'at least one choice must be selected'
-        ];
-        labels.forEach(l => {
-            const txt = (l.innerText || l.textContent || '').trim();
-            if (txt && txt.length > 0 && txt.length < 350 && !items.includes(txt)) {
-                const lower = txt.toLowerCase();
-                if (!blacklist.some(b => lower.startsWith(b) || lower === b)) {
-                    items.push(txt);
+def extract_choices(target, page=None) -> list[str]:
+    contexts = [target]
+    if page and page not in contexts:
+        contexts.append(page)
+    if page:
+        for f in page.frames:
+            if f not in contexts:
+                contexts.append(f)
+
+    # Retry up to 5 seconds to allow AJAX question regions to finish rendering
+    for attempt in range(5):
+        for ctx in contexts:
+            try:
+                choices = ctx.evaluate("""() => {
+                    const blacklist = [
+                        'instructions', 'true or false?', 'choices - just one correct!',
+                        'choices - mark all that apply!', 'exit', 'previous question',
+                        'submit answer', 'complete assessment', 'error has occurred',
+                        'errors have occurred', 'at least one choice must be selected'
+                    ];
+
+                    // 1. Direct radio / checkbox inputs
+                    const inps = Array.from(document.querySelectorAll(
+                        "input[type='radio'], input[type='checkbox']"
+                    ));
+                    if (inps.length > 0) {
+                        const results = [];
+                        inps.forEach(inp => {
+                            let labelText = '';
+                            if (inp.id) {
+                                const l = document.querySelector(`label[for="${inp.id}"]`);
+                                if (l) labelText = (l.innerText || l.textContent || '').trim();
+                            }
+                            if (!labelText) {
+                                const opt = inp.closest('.apex-item-option, label, [role="radio"], [role="checkbox"]');
+                                if (opt) labelText = (opt.innerText || opt.textContent || '').trim();
+                            }
+                            if (!labelText && inp.parentElement) {
+                                labelText = (inp.parentElement.innerText || inp.parentElement.textContent || '').trim();
+                            }
+                            if (labelText && !results.includes(labelText)) {
+                                const low = labelText.toLowerCase();
+                                if (!blacklist.some(b => low.startsWith(b) || low === b)) {
+                                    results.push(labelText);
+                                }
+                            }
+                        });
+                        if (results.length > 0) return results;
+                    }
+
+                    // 2. All labels / .apex-item-option (WITHOUT arbitrary length cutoff)
+                    const labels = Array.from(document.querySelectorAll(
+                        "label, .apex-item-option, [role='checkbox'], [role='radio']"
+                    ));
+                    const items = [];
+                    labels.forEach(l => {
+                        const txt = (l.innerText || l.textContent || '').trim();
+                        if (txt && !items.includes(txt)) {
+                            const low = txt.toLowerCase();
+                            if (!blacklist.some(b => low.startsWith(b) || low === b)) {
+                                items.push(txt);
+                            }
+                        }
+                    });
+                    if (items.length > 0) return items;
+
+                    // 3. Fallback: table rows / list items in option grid
+                    const optionContainers = Array.from(document.querySelectorAll(
+                        '.apex-item-grid tr, .apex-item-group li, table.radio_group td, table.checkbox_group td'
+                    ));
+                    const containerItems = [];
+                    optionContainers.forEach(c => {
+                        const txt = (c.innerText || c.textContent || '').trim();
+                        if (txt && !containerItems.includes(txt)) {
+                            const low = txt.toLowerCase();
+                            if (!blacklist.some(b => low.startsWith(b) || low === b)) {
+                                containerItems.push(txt);
+                            }
+                        }
+                    });
+                    return containerItems;
+                }""")
+                if choices and len(choices) > 0:
+                    return choices
+            except Exception:
+                pass
+        time.sleep(1)
+
+    return []
+
+
+def extract_question(target, page=None) -> str:
+    contexts = [target]
+    if page and page not in contexts:
+        contexts.append(page)
+    if page:
+        for f in page.frames:
+            if f not in contexts:
+                contexts.append(f)
+
+    for ctx in contexts:
+        try:
+            q = ctx.evaluate("""() => {
+                const body = document.body.innerText;
+                const m = body.match(/Question\\s+\\d+\\s+of\\s+\\d+([\\s\\S]*?)(?=Choices|True or False\\?|Submit Answer)/i);
+                if (m && m[1]) {
+                    const clean = m[1].replace(/Instructions/gi, '').trim();
+                    if (clean.length > 10) return clean;
                 }
-            }
-        });
-        return items;
-    }""")
-    if not choices:
-        choices = target.evaluate("""() => {
-            const inputs = Array.from(document.querySelectorAll(
-                "input[type='radio'], input[type='checkbox']"));
-            return inputs.map(i => {
-                const l = document.querySelector(`label[for="${i.id}"]`) || i.closest('label');
-                return l ? (l.innerText || '').trim() : '';
-            }).filter(t => t.length > 0);
-        }""")
-    return choices
-
-
-def extract_question(target) -> str:
-    return target.evaluate("""() => {
-        const body = document.body.innerText;
-        const m = body.match(/Question\\s+\\d+\\s+of\\s+\\d+([\\s\\S]*?)(?=Choices|True or False\\?)/i);
-        if (m && m[1]) {
-            const clean = m[1].replace(/Instructions/gi, '').trim();
-            if (clean.length > 10) return clean;
-        }
-        const items = Array.from(document.querySelectorAll(
-            '.question-text, .apex-item-display-only, [id*="QUESTION"]'));
-        for (const item of items) {
-            const t = (item.innerText || '').trim();
-            if (t.length > 15 && !t.includes('Instructions')) return t;
-        }
-        return '';
-    }""")
+                const items = Array.from(document.querySelectorAll(
+                    '.question-text, .apex-item-display-only, [id*="QUESTION"], h1, h2, h3'
+                ));
+                for (const item of items) {
+                    const t = (item.innerText || '').trim();
+                    if (t.length > 15 && !t.includes('Instructions') && !t.includes('Take the Assessment')) return t;
+                }
+                return '';
+            }""")
+            if q and len(q) > 10:
+                return q
+        except Exception:
+            pass
+    return "Oracle Assessment Question"
 
 
 def detect_num_to_choose(q_prompt: str, choices: list[str], target) -> int:
@@ -603,120 +676,133 @@ def click_nav(target, patterns: list[str]) -> bool:
     return False
 
 
-def submit_quiz_question(page, target, is_final: bool = False) -> bool:
-    """Submit the answered question with 100% reliability using multi-layer dispatch."""
-    labels = ["Complete Assessment", "Finish Assessment"] if is_final else ["Submit Answer", "Next Question", "Submit"]
+def click_submit_answer(page, target) -> bool:
+    """Click ONLY Submit Answer or Next Question on intermediate questions (1 to N-1).
+    MUST NEVER click Complete Assessment or Finish Assessment.
+    """
+    patterns = [r"^\s*(Submit Answer|Submit|Next Question|Next)\s*$"]
 
-    # 1. Playwright Locator & Bounding Box Mouse Click across page and all frames
-    contexts = [page, target] + [f for f in page.frames if f not in (page, target)]
-    for ctx in contexts:
-        for lbl in labels:
-            for selector in [
-                f"button:has-text('{lbl}')",
-                f"a:has-text('{lbl}')",
-                f".t-Button:has-text('{lbl}')",
-                f"[role='button']:has-text('{lbl}')",
-                f"input[value*='{lbl}']",
-                f"text='{lbl}'",
-            ]:
-                try:
-                    loc = ctx.locator(selector).first
-                    if loc.count() > 0 and loc.is_visible():
-                        # Try coordinate mouse click via bounding box
-                        box = loc.bounding_box()
-                        if box:
-                            page.mouse.click(box["x"] + box["width"] / 2, box["y"] + box["height"] / 2)
-                            time.sleep(0.3)
-                        loc.click(force=True, timeout=2000)
-                        return True
-                except Exception:
-                    pass
+    # 1. Native Playwright locator on target frame, then main page
+    for ctx in [target, page]:
+        for pat in patterns:
+            try:
+                btn = ctx.locator("button, a.t-Button, input[type='button'], input[type='submit']").filter(
+                    has_text=re.compile(pat, re.I)
+                ).first
+                if btn.count() > 0 and btn.is_visible():
+                    btn.click(force=True, timeout=3000)
+                    return True
+            except Exception:
+                pass
 
-    # 2. Comprehensive JavaScript DOM click with pointer/mouse events across all frames
-    for ctx in contexts:
+    # 2. In-DOM JS click on target frame, then main page
+    for ctx in [target, page]:
         try:
-            clicked = ctx.evaluate("""(targetLabels) => {
-                const searchDocs = [document];
-                document.querySelectorAll('iframe').forEach(f => {
-                    try { if (f.contentDocument) searchDocs.push(f.contentDocument); } catch(e){}
+            clicked = ctx.evaluate("""() => {
+                const els = Array.from(document.querySelectorAll(
+                    'button, a.t-Button, input[type="button"], input[type="submit"], [role="button"]'
+                ));
+                const b = els.find(x => {
+                    const t = (x.innerText || x.value || x.textContent || '').trim().toLowerCase();
+                    return (t === 'submit answer' || t === 'submit' ||
+                            t === 'next question' || t === 'next') &&
+                           !x.disabled && !x.classList.contains('is-disabled');
                 });
-
-                for (const doc of searchDocs) {
-                    const allEls = Array.from(doc.querySelectorAll(
-                        'button, a, input[type="button"], input[type="submit"], [role="button"], .t-Button, span'
-                    ));
-                    
-                    const match = allEls.find(el => {
-                        const t = (el.innerText || el.value || el.textContent || '').trim().toLowerCase();
-                        return targetLabels.some(l => {
-                            const lowL = l.toLowerCase();
-                            return t === lowL || (t.includes(lowL) && t.length < 35);
-                        }) && !el.disabled && !el.classList.contains('is-disabled');
-                    });
-
-                    if (match) {
-                        const clickable = match.closest('button, a, input, [role="button"]') || match;
-                        clickable.focus();
-                        clickable.click();
-
-                        ['pointerdown', 'mousedown', 'pointerup', 'mouseup', 'click'].forEach(evt => {
-                            clickable.dispatchEvent(new MouseEvent(evt, {
-                                bubbles: true,
-                                cancelable: true,
-                                view: window,
-                                buttons: 1
-                            }));
-                        });
-
-                        const onclick = clickable.getAttribute('onclick');
-                        if (onclick) {
-                            try { new Function(onclick).call(clickable); } catch(e){}
-                        }
-                        const href = clickable.getAttribute('href');
-                        if (href && href.startsWith('javascript:')) {
-                            try { new Function(href.replace(/^javascript:/, '')).call(clickable); } catch(e){}
-                        }
-                        return true;
-                    }
+                if (b) {
+                    b.focus();
+                    b.click();
+                    return true;
                 }
                 return false;
-            }""", labels)
+            }""")
             if clicked:
                 return True
-        except Exception:
-            pass
-
-    # 3. APEX Direct API Execution
-    for ctx in contexts:
-        try:
-            ctx.evaluate("""(isFinal) => {
-                if (window.apex && typeof apex.submit === 'function') {
-                    const targetText = isFinal ? 'complete assessment' : 'submit answer';
-                    const btn = Array.from(document.querySelectorAll('button, a.t-Button')).find(b => {
-                        const t = (b.innerText || '').toLowerCase();
-                        return t.includes(targetText) || t.includes('next question');
-                    });
-                    if (btn && btn.id) {
-                        apex.submit(btn.id);
-                    } else if (typeof doSubmit === 'function') {
-                        doSubmit(isFinal ? 'COMPLETE_ASSESSMENT' : 'SUBMIT_ANSWER');
-                    } else {
-                        apex.submit(isFinal ? 'COMPLETE_ASSESSMENT' : 'SUBMIT_ANSWER');
-                    }
-                } else if (typeof doSubmit === 'function') {
-                    doSubmit(isFinal ? 'COMPLETE_ASSESSMENT' : 'SUBMIT_ANSWER');
-                }
-            }""", is_final)
         except Exception:
             pass
 
     return False
 
 
+def click_complete_assessment(page, target) -> bool:
+    """Click Complete Assessment or Finish Assessment ONLY on the confirmed final question."""
+    patterns = [r"^\s*(Complete Assessment|Finish Assessment|Complete|Finish)\s*$"]
+
+    # 1. Native Playwright locator
+    for ctx in [target, page]:
+        for pat in patterns:
+            try:
+                btn = ctx.locator("button, a.t-Button, input[type='button'], input[type='submit']").filter(
+                    has_text=re.compile(pat, re.I)
+                ).first
+                if btn.count() > 0 and btn.is_visible():
+                    btn.click(force=True, timeout=3000)
+                    return True
+            except Exception:
+                pass
+
+    # 2. In-DOM JS click
+    for ctx in [target, page]:
+        try:
+            clicked = ctx.evaluate("""() => {
+                const els = Array.from(document.querySelectorAll(
+                    'button, a.t-Button, input[type="button"], input[type="submit"], [role="button"]'
+                ));
+                const b = els.find(x => {
+                    const t = (x.innerText || x.value || x.textContent || '').trim().toLowerCase();
+                    return (t.includes('complete assessment') || t.includes('finish assessment') ||
+                            t === 'complete' || t === 'finish') &&
+                           !x.disabled && !x.classList.contains('is-disabled');
+                });
+                if (b) {
+                    b.focus();
+                    b.click();
+                    return true;
+                }
+                return false;
+            }""")
+            if clicked:
+                return True
+        except Exception:
+            pass
+
+    return False
+
+
+def confirm_completion_modal(page) -> bool:
+    """Handle confirmation dialog modal when finishing the assessment."""
+    time.sleep(2)
+    for _ in range(8):
+        confirmed = page.evaluate("""() => {
+            const dialogs = Array.from(document.querySelectorAll(
+                '.ui-dialog, [role="dialog"], .t-DialogRegion, .ui-widget-content'));
+            for (const dialog of dialogs) {
+                if (dialog.offsetHeight > 0) {
+                    const btns = Array.from(dialog.querySelectorAll(
+                        'button, a.t-Button, input[type="button"]'));
+                    const btn = btns.find(b => {
+                        const t = (b.innerText || b.value || '').trim().toLowerCase();
+                        return (t.includes('complete assessment') ||
+                                t.includes('finish assessment') ||
+                                t === 'yes' || t === 'ok' ||
+                                t === 'submit') && !b.disabled;
+                    });
+                    if (btn) { btn.click(); return btn.innerText || 'Confirmed'; }
+                }
+            }
+            return null;
+        }""")
+        if confirmed:
+            print(f"  [MODAL] Confirmed final assessment completion: '{confirmed}'", flush=True)
+            time.sleep(5)
+            return True
+        time.sleep(1)
+    return False
+
+
 def run_quiz(page, quiz_label: str) -> None:
     print(f"\n{'='*60}\n[QUIZ] {quiz_label}\n{'='*60}", flush=True)
     q_idx = 1
-    max_q = 60
+    max_q = 75
 
     while q_idx <= max_q:
         time.sleep(2)
@@ -737,16 +823,22 @@ def run_quiz(page, quiz_label: str) -> None:
 
         print(f"\n>>> [{q_num}] <<<", flush=True)
 
-        choices = extract_choices(target)
+        choices = extract_choices(target, page)
         if not choices:
             body = target.locator("body").inner_text() or ""
             if any(w in body.lower() for w in ("score", "grade", "passed", "completed", "review")):
                 print("[QUIZ] Completion screen detected", flush=True)
                 break
-            print("[QUIZ] No choices found, stopping", flush=True)
-            break
+            if "p=63000:192" in page.url or page.locator("text=/Percentage\\s+Scored/i").count() > 0:
+                print("[QUIZ] Reached score summary page 192", flush=True)
+                break
+            print(f"[QUIZ] No choices extracted on {q_num} — clicking Submit Answer to advance", flush=True)
+            click_submit_answer(page, target)
+            time.sleep(3)
+            q_idx += 1
+            continue
 
-        q_prompt = extract_question(target)
+        q_prompt = extract_question(target, page)
         print(f"  Q: {q_prompt[:90]}", flush=True)
         print(f"  Choices: {[c.splitlines()[0][:40] for c in choices]}", flush=True)
 
@@ -758,69 +850,51 @@ def run_quiz(page, quiz_label: str) -> None:
         select_options(target, chosen, choices)
         time.sleep(0.8)
 
-        # Robust detection of last question (e.g. "Question 15 of 15", "Question 30 of 30", "Question 50 of 50")
+        # Strict detection of last question (e.g. "Question 15 of 15", "Question 50 of 50")
         is_last = False
         m_q = re.search(r"Question\s+(\d+)\s+of\s+(\d+)", q_num, re.IGNORECASE)
         if not m_q:
             m_q = re.search(r"Question\s+(\d+)\s+of\s+(\d+)", q_prompt, re.IGNORECASE)
-        if m_q and int(m_q.group(1)) == int(m_q.group(2)):
-            is_last = True
-
-        if not is_last:
+        if not m_q:
             try:
-                has_complete_btn = target.evaluate("""() => {
-                    const btns = Array.from(document.querySelectorAll('button, input[type="button"], a.t-Button'));
-                    return btns.some(b => {
-                        const t = (b.innerText || b.value || '').trim().toLowerCase();
-                        return (t.includes('complete assessment') || t.includes('finish assessment')) && !b.disabled;
-                    });
+                found_txt = target.evaluate("""() => {
+                    const all = Array.from(document.querySelectorAll('*'));
+                    const match = all.find(el => el.children.length === 0 &&
+                        /Question\\s+\\d+\\s+of\\s+\\d+/i.test((el.innerText || '').trim()));
+                    return match ? match.innerText.trim() : '';
                 }""")
-                if has_complete_btn:
-                    is_last = True
+                if found_txt:
+                    m_q = re.search(r"Question\s+(\d+)\s+of\s+(\d+)", found_txt, re.IGNORECASE)
             except Exception:
                 pass
 
+        if m_q:
+            cur_q = int(m_q.group(1))
+            total_q = int(m_q.group(2))
+            is_last = (cur_q >= total_q)
+            print(f"  [QUESTION PROGRESS] Question {cur_q} of {total_q} (is_last={is_last})", flush=True)
+        else:
+            is_last = False
+
         if is_last:
             print(f"  [ACTION] Final question reached ({q_num}) — Complete Assessment", flush=True)
-            submit_quiz_question(page, target, is_final=True)
-            time.sleep(2)
-            for _ in range(8):
-                confirmed = page.evaluate("""() => {
-                    const dialogs = Array.from(document.querySelectorAll(
-                        '.ui-dialog, [role="dialog"], .t-DialogRegion, .ui-widget-content'));
-                    for (const dialog of dialogs) {
-                        if (dialog.offsetHeight > 0) {
-                            const btns = Array.from(dialog.querySelectorAll(
-                                'button, a.t-Button, input[type="button"]'));
-                            const btn = btns.find(b => {
-                                const t = (b.innerText || b.value || '').trim().toLowerCase();
-                                return (t.includes('complete assessment') ||
-                                        t === 'yes' || t === 'ok' ||
-                                        t === 'submit') && !b.disabled;
-                            });
-                            if (btn) { btn.click(); return btn.innerText; }
-                        }
-                    }
-                    return null;
-                }""")
-                if confirmed:
-                    print(f"  [MODAL] Confirmed: '{confirmed}'", flush=True)
-                    time.sleep(5)
-                    break
-                time.sleep(1)
+            click_complete_assessment(page, target)
+            confirm_completion_modal(page)
+            time.sleep(5)
+            break
         else:
-            print(f"  [ACTION] Submitting answer for {q_num}...", flush=True)
-            submit_quiz_question(page, target, is_final=False)
+            print(f"  [ACTION] Submitting answer for {q_num} ('Submit Answer')...", flush=True)
+            click_submit_answer(page, target)
 
-            # Wait for next question or page update with active re-triggering
+            # Wait for next question or page update
             advanced = False
-            for wait_sec in range(10):
+            for wait_sec in range(8):
                 time.sleep(1)
                 try:
                     if "p=63000:192" in page.url or "percentage" in (page.title() or "").lower():
                         advanced = True
                         break
-                    
+
                     q_after = None
                     for ctx in [target, page]:
                         try:
@@ -840,25 +914,19 @@ def run_quiz(page, quiz_label: str) -> None:
                         advanced = True
                         q_idx += 1
                         break
-
-                    # Active re-trigger if page hasn't advanced
-                    if wait_sec in (2, 4, 6):
-                        print(f"  [RETRY SUBMIT] Re-triggering Submit Answer (sec={wait_sec})...", flush=True)
-                        submit_quiz_question(page, target, is_final=False)
-
                 except Exception:
-                    time.sleep(2)
-                    advanced = True
-                    q_idx += 1
-                    break
+                    pass
 
             if not advanced:
-                print(f"  [RETRY APEX] Still on {q_num} — sending direct APEX submit event", flush=True)
-                submit_quiz_question(page, target, is_final=False)
+                print(f"  [RETRY SUBMIT] Still on {q_num} — clicking Submit Answer again...", flush=True)
+                click_submit_answer(page, target)
                 time.sleep(3)
                 q_idx += 1
 
-    handle_score_summary(page, quiz_label)
+    if "p=63000:192" in page.url or page.locator("text=/Percentage\\s+Scored/i").count() > 0:
+        handle_score_summary(page, quiz_label)
+    else:
+        print("[QUIZ] Loop ended without reaching score summary page 192", flush=True)
 
 
 def harvest_results(page) -> int:
@@ -968,30 +1036,45 @@ def handle_score_summary(page, quiz_label: str) -> None:
 
 
 def find_and_click_quiz_link(page) -> bool:
-    """Find and click a quiz, midterm, or final exam link in the sidebar
-    or course outline. Returns True if clicked."""
+    """Find and click an incomplete quiz, midterm, or final exam link."""
     clicked = page.evaluate(r"""() => {
+        const isAssessmentText = (t) => {
+            const low = (t || '').toLowerCase();
+            return low.includes('quiz') || low.includes('midterm') ||
+                   low.includes('final exam') || low.includes('final examination') ||
+                   low.includes('exam') || low.includes('test:');
+        };
+
         const links = Array.from(document.querySelectorAll('a'));
-        const quizLinks = links.filter(a => {
-            const t = (a.innerText || '').trim();
-            return /quiz/i.test(t) || /midterm/i.test(t) || /final\s*exam/i.test(t) ||
-                   /section/i.test(t) || /exam/i.test(t) || /test/i.test(t);
+        const assessmentLinks = links.filter(a => {
+            const t = (a.innerText || a.textContent || '').trim();
+            return isAssessmentText(t);
         });
-        for (const ql of quizLinks) {
-            const parent = ql.closest('tr, li, .t-TreeNav-item, .t-Card, div');
-            const parentText = (parent ? parent.innerText : ql.innerText).toLowerCase();
+
+        for (const al of assessmentLinks) {
+            const parent = al.closest('tr, li, .t-TreeNav-item, .a-CardView-item, .t-Card');
+            const parentText = (parent ? parent.innerText : al.innerText).toLowerCase();
+            const isActive = parentText.includes('(active)') ||
+                             (parent && parent.classList.contains('is-active')) ||
+                             (parent && parent.classList.contains('is-current')) ||
+                             al.classList.contains('is-active');
+            if (isActive && window.location.href.includes('63000:15')) {
+                // Already on this assessment's page 15! Don't click to reload.
+                continue;
+            }
             const isDone = parentText.includes('100%') || parentText.includes('passed') ||
-                           parentText.includes('mastery achieved');
+                           parentText.includes('mastery achieved') ||
+                           (parent && parent.querySelector('.u-success, .fa-check, .fa-check-circle, [class*="check"]') !== null);
             if (!isDone) {
-                ql.click();
-                return { clicked: true, text: (ql.innerText || '').trim(),
-                         href: ql.href || '' };
+                if (al.scrollIntoViewIfNeeded) al.scrollIntoViewIfNeeded();
+                al.click();
+                return { clicked: true, text: (al.innerText || '').trim(), href: al.href || '' };
             }
         }
         return { clicked: false };
     }""")
     if clicked.get("clicked"):
-        print(f"  [QUIZ/EXAM LINK] Clicked: '{clicked.get('text')}'", flush=True)
+        print(f"  [ASSESSMENT LINK] Clicked: '{clicked.get('text')}'", flush=True)
         time.sleep(5)
         return True
     return False
@@ -1098,58 +1181,102 @@ def handle_quiz_landing(page):
 
 
 def handle_page_15(page):
-    """Lesson page: click quiz link, Take an Assessment, or Save and Continue."""
-    if find_and_click_quiz_link(page):
-        return page
+    """Page 15: Lesson or Assessment Landing / Resume page.
+    Launches or resumes the assessment into Page 190.
+    """
+    print("  [PAGE 15] Inspecting assessment landing / resume screen", flush=True)
+    time.sleep(2)
 
-    has_take = page.locator(
-        "button:has-text('Take an Assessment'), a:has-text('Take an Assessment'), "
-        "button:has-text('Start Assessment')"
-    ).count() > 0
-    if has_take:
-        return handle_quiz_landing(page)
+    # 1. Check if start/resume modal dialog is already open
+    if handle_start_modal(page):
+        time.sleep(3)
+        if "p=63000:190" in page.url:
+            print("  [PAGE 15] Quiz launched via start modal", flush=True)
+            return page
 
-    body = page.locator("body").inner_text(timeout=3000) or ""
-    if "save and continue" in body.lower() or "save & continue" in body.lower():
-        print("  [THEORY] Clicking 'Save and Continue'", flush=True)
-        url_before = page.url
+    # 2. Check for Take / Resume / Start Assessment buttons
+    btn_info = page.evaluate("""() => {
+        const btns = Array.from(document.querySelectorAll(
+            'button, a, .t-Button, input[type="button"], input[type="submit"], [role="button"]'
+        ));
+        const b = btns.find(x => {
+            const t = (x.innerText || x.value || '').trim().toLowerCase();
+            return [
+                'resume assessment', 'take an assessment', 'start assessment',
+                'continue assessment', 'take assessment', 'start', 'resume',
+                'finish assessment'
+            ].some(k => t === k || t.startsWith(k));
+        });
+        if (b) {
+            return {
+                found: true,
+                text: (b.innerText || b.value || '').trim(),
+                href: b.href || '',
+                tag: b.tagName
+            };
+        }
+        return { found: false };
+    }""")
+
+    if btn_info.get("found"):
+        btn_text = btn_info.get("text")
+        print(f"  [PAGE 15] Found assessment launch button: '{btn_text}'", flush=True)
+
+        # Click using Playwright locator
         try:
-            btn = page.locator(
-                "button:has-text('Save and Continue'), "
-                "button:has-text('Save & Continue'), "
-                "button:has-text('Save and continue')"
+            loc = page.locator("button, a, .t-Button, input[type='button']").filter(
+                has_text=re.compile(re.escape(btn_text), re.I)
             ).first
-            if btn.count() > 0 and btn.is_visible():
-                btn.click(force=True, timeout=5000)
-                time.sleep(5)
-                if page.url != url_before:
-                    print("  [THEORY] Advanced to next slide", flush=True)
-                    return page
-                print("  [THEORY] URL unchanged — trying JS click", flush=True)
+            if loc.count() > 0 and loc.is_visible():
+                loc.click(force=True, timeout=5000)
+                print(f"  [PAGE 15] Clicked '{btn_text}' via locator", flush=True)
+                time.sleep(4)
         except Exception:
             pass
-        page.evaluate("""() => {
-            const btns = Array.from(document.querySelectorAll('button'));
-            const b = btns.find(x => {
-                const t = (x.innerText || '').trim().toLowerCase();
-                return t.includes('save') && t.includes('continue');
-            });
-            if (b) b.click();
-        }""")
-        time.sleep(5)
-        if page.url != url_before:
-            print("  [THEORY] Advanced via JS click", flush=True)
+
+        # Fallback in-DOM click
+        if "p=63000:190" not in page.url:
+            page.evaluate("""(targetText) => {
+                const btns = Array.from(document.querySelectorAll(
+                    'button, a, .t-Button, input[type="button"], [role="button"]'
+                ));
+                const b = btns.find(x => {
+                    const t = (x.innerText || x.value || '').trim().toLowerCase();
+                    return t === targetText.toLowerCase() || t.startsWith(targetText.toLowerCase());
+                });
+                if (b) b.click();
+            }""", btn_text)
+            time.sleep(4)
+
+        # Check for start modal
+        handle_start_modal(page)
+        for f in page.frames:
+            try:
+                handle_start_modal(f)
+            except Exception:
+                pass
+
+        if "p=63000:190" in page.url:
+            print("  [PAGE 15] Successfully transitioned to Quiz Page 190!", flush=True)
+            return page
+
+        # Check for new tabs
+        context = page.context
+        if len(context.pages) > 1:
+            for p in context.pages:
+                if "63000:190" in p.url:
+                    p.bring_to_front()
+                    print(f"  [PAGE 15] Switched to new tab: {p.url[:70]}", flush=True)
+                    return p
+
         return page
 
-    if "finish assessment" in body.lower() or "resume assessment" in body.lower():
-        print("  [RESUME] Found 'Finish/Resume Assessment' — continuing quiz",
-              flush=True)
+    # 3. Theory / Slides: Save and Continue
+    body = page.locator("body").inner_text(timeout=2000) or ""
+    if "save and continue" in body.lower() or "save & continue" in body.lower():
+        print("  [THEORY] Clicking 'Save and Continue'", flush=True)
         try:
-            btn = page.locator(
-                "button:has-text('Finish Assessment'), "
-                "button:has-text('Resume Assessment'), "
-                "a:has-text('Finish Assessment')"
-            ).first
+            btn = page.locator("button:has-text('Save and Continue'), button:has-text('Save & Continue')").first
             if btn.count() > 0 and btn.is_visible():
                 btn.click(force=True, timeout=5000)
                 time.sleep(4)
@@ -1157,7 +1284,10 @@ def handle_page_15(page):
         except Exception:
             pass
 
-    print("  [PAGE 15] No action taken", flush=True)
+    # 4. Only if not on an assessment and not on theory, check for quiz link in sidebar
+    if not any(w in body.lower() for w in ("assessment", "midterm", "exam", "quiz")):
+        find_and_click_quiz_link(page)
+
     return page
 
 
@@ -1169,18 +1299,25 @@ def handle_page_14(page) -> str | bool:
     if find_and_click_quiz_link(page):
         return True
     result = page.evaluate("""() => {
+        const isAssessmentText = (t) => {
+            const low = (t || '').toLowerCase();
+            return low.includes('quiz') || low.includes('midterm') ||
+                   low.includes('final exam') || low.includes('final examination') ||
+                   low.includes('exam') || low.includes('test:');
+        };
+
         const containers = Array.from(document.querySelectorAll(
             'tr, .a-CardView-item, .t-Card, li, .t-TreeNav-item, .t-Region'));
         const items = [];
         for (const c of containers) {
-            const text = (c.innerText || '').toLowerCase();
-            if (/section\\s*\\d+/i.test(text) || /quiz/i.test(text) || /midterm/i.test(text) || /final/i.test(text) || /exam/i.test(text) || /test/i.test(text)) {
-                const isDone = text.includes('100%') ||
-                    text.includes('mastery achieved') || text.includes('passed') ||
+            const text = (c.innerText || '').trim();
+            if (isAssessmentText(text)) {
+                const isDone = text.toLowerCase().includes('100%') ||
+                    text.toLowerCase().includes('mastery achieved') || text.toLowerCase().includes('passed') ||
                     c.querySelector('.u-success, .fa-check, .fa-check-circle, [class*="check"], [class*="complete"]') !== null;
                 const link = c.querySelector('a') || (c.tagName === 'A' ? c : null);
                 items.push({ isDone, hasLink: !!link,
-                             text: (c.innerText || '').trim().substring(0, 60) });
+                             text: text.substring(0, 60) });
             }
         }
         const hasIncomplete = items.some(i => !i.isDone && i.hasLink);
@@ -1188,14 +1325,15 @@ def handle_page_14(page) -> str | bool:
             return { allCompleted: true, clicked: null };
         }
         for (const c of containers) {
-            const text = (c.innerText || '').toLowerCase();
-            if (/section\\s*\\d+/i.test(text) || /quiz/i.test(text) || /midterm/i.test(text) || /final/i.test(text) || /exam/i.test(text) || /test/i.test(text)) {
-                const isDone = text.includes('100%') ||
-                    text.includes('mastery achieved') || text.includes('passed') ||
+            const text = (c.innerText || '').trim();
+            if (isAssessmentText(text)) {
+                const isDone = text.toLowerCase().includes('100%') ||
+                    text.toLowerCase().includes('mastery achieved') || text.toLowerCase().includes('passed') ||
                     c.querySelector('.u-success, .fa-check, .fa-check-circle, [class*="check"], [class*="complete"]') !== null;
                 if (!isDone) {
                     const link = c.querySelector('a') || (c.tagName === 'A' ? c : null);
                     if (link) {
+                        if (link.scrollIntoViewIfNeeded) link.scrollIntoViewIfNeeded();
                         link.click();
                         return { allCompleted: false,
                                  clicked: (link.innerText || '').trim().split('\\n')[0] };
@@ -1329,41 +1467,21 @@ def run():
                       flush=True)
 
                 try:
+                    # 1. Page 192 (Score Summary)
                     if "p=63000:192" in curr_url or \
                             page.locator("text=/Percentage\\s+Scored/i").count() > 0:
                         handle_score_summary(page, f"Quiz_{cycle}")
                         continue
 
+                    # 2. Page 190 (Active Quiz Question Page)
                     target = get_quiz_target(page)
-                    has_question = False
-                    try:
-                        has_question = (
-                            "p=63000:190" in curr_url or
-                            "take the assessment" in title.lower() or
-                            target.locator("text=/Question\\s+\\d+\\s+of\\s+\\d+/i").count() > 0
-                        )
-                    except Exception:
-                        pass
-
-                    if has_question:
+                    is_quiz_p190 = ("p=63000:190" in curr_url) or (target != page and "63000:190" in target.url)
+                    if is_quiz_p190:
                         run_quiz(page, f"Quiz_{cycle}")
                         continue
 
-                    has_take_assessment = False
-                    try:
-                        has_take_assessment = page.locator(
-                            "button:has-text('Take an Assessment'), "
-                            "a:has-text('Take an Assessment'), "
-                            "button:has-text('Start Assessment')"
-                        ).count() > 0
-                    except Exception:
-                        pass
-
-                    if has_take_assessment:
-                        page = handle_quiz_landing(page)
-                        continue
-
-                    if "p=63000:15" in curr_url or "class course lesson" in title.lower():
+                    # 3. Page 15 (Lesson / Assessment Landing / Resume Page)
+                    if "p=63000:15" in curr_url or "class course lesson" in title.lower() or "take the assessment" in title.lower():
                         result = handle_page_15(page)
                         if isinstance(result, type(page)):
                             page = result
