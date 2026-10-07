@@ -221,35 +221,15 @@ def evaluate_oracle_sql_deterministically(question: str, choices: list[str]) -> 
 
 
 def solve_question(question: str, choices: list[str], num_to_choose: int = 1) -> list[int]:
-    """Multi-tier solver returning list of selected option indices (supports single and multi-select)."""
+    """Pure Gemini reasoning solver for single and multi-select assessments (no predefined answers)."""
     if not choices:
         return [0]
     if len(choices) <= num_to_choose:
         return list(range(len(choices)))
 
-    # Tier 1: Check verified answer cache
-    cache = load_answers_cache()
-    q_low = question.lower()
-    cached_indices = []
-    for cached_q, cached_a in cache.items():
-        if cached_q.lower() in q_low or q_low in cached_q.lower():
-            if isinstance(cached_a, list):
-                for a_item in cached_a:
-                    for idx, c in enumerate(choices):
-                        if (a_item.lower() in c.lower() or c.lower() in a_item.lower()) and idx not in cached_indices:
-                            cached_indices.append(idx)
-            else:
-                for idx, c in enumerate(choices):
-                    if (cached_a.lower() in c.lower() or c.lower() in cached_a.lower()) and idx not in cached_indices:
-                        cached_indices.append(idx)
-    if len(cached_indices) >= num_to_choose:
-        print(f"[CACHE HIT] Verified Answers: {[choices[i].splitlines()[0] for i in cached_indices[:num_to_choose]]}")
-        return cached_indices[:num_to_choose]
-
-    # Tier 2: Try Gemini Flash Lite with temperature 0.0 (100% deterministic)
     choices_formatted = "\n".join(f"{idx}: {text}" for idx, text in enumerate(choices))
     if num_to_choose > 1:
-        prompt = f"""You are an expert Oracle SQL Database administrator taking an official Oracle Academy assessment.
+        prompt = f"""You are an expert Oracle SQL & PL/SQL Database administrator taking an official Oracle Academy assessment.
 Question:
 {question}
 
@@ -258,9 +238,10 @@ Choices:
 
 IMPORTANT: This question requires you to select EXACTLY {num_to_choose} correct options.
 Select the {num_to_choose} best correct choice indices (0 to {len(choices)-1}).
+Think step by step about Oracle SQL and PL/SQL semantics before answering.
 Respond ONLY with a JSON object: {{"choice_indices": [<int>, ...], "reasoning": "<1 sentence>"}}"""
     else:
-        prompt = f"""You are an expert Oracle SQL Database administrator taking an official Oracle Academy assessment.
+        prompt = f"""You are an expert Oracle SQL & PL/SQL Database administrator taking an official Oracle Academy assessment.
 Question:
 {question}
 
@@ -268,6 +249,7 @@ Choices:
 {choices_formatted}
 
 Select the single best correct choice index (0 to {len(choices)-1}).
+Think step by step about Oracle SQL and PL/SQL semantics before answering.
 Respond ONLY with a JSON object: {{"choice_indices": [<int>], "reasoning": "<1 sentence>"}}"""
 
     payload = json.dumps({
@@ -275,11 +257,22 @@ Respond ONLY with a JSON object: {{"choice_indices": [<int>], "reasoning": "<1 s
         "generationConfig": {"temperature": 0.0, "topP": 1.0, "maxOutputTokens": 300}
     }).encode("utf-8")
 
-    for model in [PRIMARY_MODEL, FALLBACK_MODEL]:
+    from oracle.env_helper import get_gemini_api_key
+    current_key = os.getenv("GEMINI_API_KEY", "") or get_gemini_api_key()
+
+    candidate_models = [
+        "gemini-2.5-flash",
+        "gemini-2.0-flash",
+        "gemini-1.5-flash",
+        "gemini-flash-lite-latest",
+    ]
+
+    last_err = None
+    for model in candidate_models:
         try:
-            url = f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent?key={API_KEY}"
+            url = f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent?key={current_key}"
             req = urllib.request.Request(url, data=payload, headers={"Content-Type": "application/json"})
-            with urllib.request.urlopen(req, timeout=4) as resp:
+            with urllib.request.urlopen(req, timeout=10) as resp:
                 data = json.loads(resp.read().decode("utf-8"))
                 text = data["candidates"][0]["content"]["parts"][0]["text"].strip()
                 if text.startswith("```"):
@@ -293,36 +286,15 @@ Respond ONLY with a JSON object: {{"choice_indices": [<int>], "reasoning": "<1 s
                 if len(valid_indices) >= num_to_choose:
                     print(f"[{model.upper()}] Selected Options {[i+1 for i in valid_indices[:num_to_choose]]}: {[choices[i].splitlines()[0] for i in valid_indices[:num_to_choose]]}")
                     print(f"[REASONING] {parsed.get('reasoning', '')}")
-                    res = valid_indices[:num_to_choose]
-                    # Cache immediately
-                    try:
-                        clean_q = re.sub(r"\s+", " ", question.strip())[:80]
-                        cache[clean_q] = [choices[i] for i in res] if len(res) > 1 else choices[res[0]]
-                        save_answers_cache(cache)
-                    except Exception:
-                        pass
-                    return res
+                    return valid_indices[:num_to_choose]
                 elif valid_indices:
                     return valid_indices
-        except Exception:
+        except Exception as exc:
+            last_err = exc
             continue
 
-    # Tier 3: Instant Deterministic Rule Engine
-    idx = evaluate_oracle_sql_deterministically(question, choices)
-    indices = [idx]
-    if num_to_choose > 1:
-        for i in range(len(choices)):
-            if i != idx and len(indices) < num_to_choose:
-                indices.append(i)
-    print(f"[DETERMINISTIC SQL ENGINE] Selected Options {[i+1 for i in indices]}: {[choices[i].splitlines()[0] for i in indices]}")
-    # Cache immediately
-    try:
-        clean_q = re.sub(r"\s+", " ", question.strip())[:80]
-        cache[clean_q] = [choices[i] for i in indices] if len(indices) > 1 else choices[indices[0]]
-        save_answers_cache(cache)
-    except Exception:
-        pass
-    return indices
+    print(f"[GEMINI ERROR] All models failed. Last error: {last_err}")
+    return list(range(min(num_to_choose, len(choices))))
 
 
 def run_page_190_quiz_solver(page: Page, quiz_title: str):

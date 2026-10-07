@@ -7,15 +7,20 @@ from pathlib import Path
 
 
 def load_env(env_path: Path | None = None) -> dict[str, str]:
-    """Load key-value pairs from .env into os.environ if not already present."""
+    """Load key-value pairs from .env into os.environ, always updating with freshest values."""
     if env_path is None:
-        cur = Path(__file__).resolve().parent
-        for _ in range(4):
-            candidate = cur / ".env"
-            if candidate.is_file():
-                env_path = candidate
+        candidates = [
+            Path(__file__).resolve().parent / ".env",
+            Path(__file__).resolve().parent.parent / ".env",
+            Path.cwd() / ".env",
+            Path.cwd() / "Lakra-2.0" / ".env",
+            Path.cwd().parent / ".env",
+            Path.cwd().parent / "Lakra-2.0" / ".env",
+        ]
+        for c in candidates:
+            if c.is_file():
+                env_path = c.resolve()
                 break
-            cur = cur.parent
 
     values: dict[str, str] = {}
     if env_path and env_path.is_file():
@@ -27,8 +32,7 @@ def load_env(env_path: Path | None = None) -> dict[str, str]:
             k = k.strip()
             v = v.strip().strip('"').strip("'")
             values[k] = v
-            if k not in os.environ:
-                os.environ[k] = v
+            os.environ[k] = v
     return values
 
 

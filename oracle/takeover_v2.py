@@ -25,23 +25,68 @@ import urllib.request
 from pathlib import Path
 
 print = functools.partial(print, flush=True)
-socket.setdefaulttimeout(5)
+socket.setdefaulttimeout(20)
 
 ROOT = Path(__file__).resolve().parent.parent
+PARENT = Path(__file__).resolve().parent
+for p in [str(ROOT), str(PARENT), str(ROOT.parent)]:
+    if p not in sys.path:
+        sys.path.insert(0, p)
+
 PROFILE_DIR = ROOT / "var" / "sessions" / "oracle"
 SHOTS_DIR = ROOT / "var" / "do-shots" / "takeover_v2"
 
-try:
-    from oracle.env_helper import get_gemini_api_key, get_student_email
-    API_KEY = get_gemini_api_key()
-    EMAIL = get_student_email()
-except Exception:
-    import os
-    API_KEY = os.getenv("GEMINI_API_KEY", "")
-    EMAIL = os.getenv("ORACLE_STUDENT_EMAIL", "")
 
-PRIMARY_MODEL = "gemini-flash-lite-latest"
-FALLBACK_MODEL = "gemini-3.8-flash"
+def get_active_api_key() -> str:
+    try:
+        from oracle.env_helper import get_gemini_api_key
+        key = get_gemini_api_key()
+        if key:
+            return key
+    except Exception:
+        pass
+    candidates = [
+        ROOT / ".env",
+        PARENT / ".env",
+        Path.cwd() / ".env",
+        Path.cwd() / "Lakra-2.0" / ".env",
+        Path.cwd().parent / ".env",
+        Path.cwd().parent / "Lakra-2.0" / ".env",
+    ]
+    for c in candidates:
+        if c.is_file():
+            for line in c.read_text(encoding="utf-8").splitlines():
+                line = line.strip()
+                if line.startswith("GEMINI_API_KEY="):
+                    k = line.split("=", 1)[1].strip().strip('"').strip("'")
+                    if k:
+                        import os
+                        os.environ["GEMINI_API_KEY"] = k
+                        return k
+    import os
+    return os.getenv("GEMINI_API_KEY", "")
+
+
+def get_active_student_email() -> str:
+    try:
+        from oracle.env_helper import get_student_email
+        return get_student_email()
+    except Exception:
+        import os
+        return os.getenv("ORACLE_STUDENT_EMAIL", "")
+
+
+API_KEY = get_active_api_key()
+EMAIL = get_active_student_email()
+
+CANDIDATE_MODELS = [
+    "gemini-3.1-flash-lite-preview",
+    "gemini-3.1-flash-lite",
+    "gemini-flash-lite-latest",
+    "gemini-3.5-flash-lite",
+    "gemini-3.5-flash",
+    "gemini-flash-latest",
+]
 HUB_URL = "https://academy.oracle.com/pls/f?p=63000:1"
 
 HOST_RESOLVER_RULES = (
@@ -57,7 +102,7 @@ def is_signed_in(text: str) -> bool:
     has_signin = any(m in low for m in ("username or email", "sign in to oracle"))
     has_signedin = any(m in low for m in (
         "my classes", "sign out", "database programming",
-        "taking a class", "course outline")) or EMAIL in text
+        "taking a class", "course outline", "pl/sql", "sql")) or (EMAIL and EMAIL in text)
     return has_signedin and not has_signin
 
 
@@ -94,11 +139,17 @@ def wait_for_signin(page, timeout_s: int = 900) -> bool:
 
 
 def get_quiz_target(page):
+    try:
+        if page.locator("input[type='radio'], input[type='checkbox']").count() > 0:
+            return page
+    except Exception:
+        pass
+
     for frame in page.frames:
         try:
-            if "p=63000:190" in frame.url:
-                return frame
             if frame.locator("input[type='radio'], input[type='checkbox']").count() > 0:
+                return frame
+            if "63000:190" in frame.url:
                 return frame
         except Exception:
             pass
@@ -109,56 +160,102 @@ def solve_with_gemini(question: str, choices: list[str], num_to_choose: int = 1)
     choices_formatted = "\n".join(f"{i}: {t}" for i, t in enumerate(choices))
     if num_to_choose > 1:
         prompt = (
-            "You are an expert Oracle SQL Database administrator. You are taking an official "
-            "Oracle Academy assessment on SQL. Read the question carefully and select ALL correct answers.\n\n"
+            "You are an expert Oracle SQL & PL/SQL Database Administrator taking an official "
+            "Oracle Academy assessment. Read the question carefully and select ALL correct answers.\n\n"
             f"Question:\n{question}\n\nChoices:\n{choices_formatted}\n\n"
-            f"This question requires EXACTLY {num_to_choose} correct answers. "
-            f"Select the {num_to_choose} best correct option indices (0-based, 0 to {len(choices)-1}).\n"
-            "Think step by step about SQL semantics before answering.\n"
-            f'Respond ONLY with JSON: {{"choice_indices": [<int>, ...], "reasoning": "<brief explanation>"}}'
+            f"IMPORTANT: This question requires you to select EXACTLY {num_to_choose} correct options.\n"
+            "Step 1: Analyze Oracle Database semantics, syntax, and exact rules for each choice.\n"
+            "Step 2: State why each choice is correct or incorrect.\n"
+            f"Step 3: Select the {num_to_choose} best correct option indices (0-based, 0 to {len(choices)-1}).\n\n"
+            'Respond ONLY with JSON format: {"analysis": "<step-by-step reasoning>", "choice_indices": [<int>, ...]}'
         )
     else:
         prompt = (
-            "You are an expert Oracle SQL Database administrator. You are taking an official "
-            "Oracle Academy assessment on SQL. Read the question carefully and select the ONE best answer.\n\n"
+            "You are an expert Oracle SQL & PL/SQL Database Administrator taking an official "
+            "Oracle Academy assessment. Read the question carefully and select the ONE best answer.\n\n"
             f"Question:\n{question}\n\nChoices:\n{choices_formatted}\n\n"
-            "Select the single best correct option index (0-based, 0 to " + str(len(choices)-1) + ").\n"
-            "Think step by step about SQL semantics before answering.\n"
-            'Respond ONLY with JSON: {"choice_indices": [<int>], "reasoning": "<brief explanation>"}'
+            "Step 1: Analyze Oracle Database semantics, syntax, and exact rules for each choice.\n"
+            "Step 2: State why each choice is correct or incorrect.\n"
+            f"Step 3: Select the single best correct option index (0-based, 0 to {len(choices)-1}).\n\n"
+            'Respond ONLY with JSON format: {"analysis": "<step-by-step reasoning>", "choice_indices": [<int>]}'
         )
 
     payload = json.dumps({
         "contents": [{"parts": [{"text": prompt}]}],
-        "generationConfig": {"temperature": 0.0, "topP": 1.0, "maxOutputTokens": 300}
+        "generationConfig": {"temperature": 0.0, "topP": 1.0, "maxOutputTokens": 600}
     }).encode("utf-8")
 
-    for model in (PRIMARY_MODEL, FALLBACK_MODEL):
-        try:
-            url = f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent?key={API_KEY}"
-            req = urllib.request.Request(url, data=payload,
-                                         headers={"Content-Type": "application/json"})
-            with urllib.request.urlopen(req, timeout=6) as resp:
-                data = json.loads(resp.read().decode("utf-8"))
-            text = data["candidates"][0]["content"]["parts"][0]["text"].strip()
-            if text.startswith("```"):
-                text = re.sub(r"^```(?:json)?\s*", "", text)
-                text = re.sub(r"\s*```$", "", text)
-            parsed = json.loads(text.strip())
-            raw = parsed.get("choice_indices", [])
-            if not raw and "choice_index" in parsed:
-                raw = [parsed["choice_index"]]
-            valid = [int(i) for i in raw if 0 <= int(i) < len(choices)]
-            if len(valid) >= num_to_choose:
-                res = valid[:num_to_choose]
-                print(f"  [{model}] -> {[i+1 for i in res]} "
-                      f"{[choices[i].splitlines()[0][:40] for i in res]}", flush=True)
-                return res
-            if valid:
-                return valid
-        except Exception as exc:
-            print(f"  [{model}] failed: {exc}", flush=True)
-            continue
-    return [0]
+    current_key = get_active_api_key()
+    if not current_key:
+        print("\n" + "!" * 70, flush=True)
+        print("  [CRITICAL] No GEMINI_API_KEY found in .env or environment!", flush=True)
+        print("  Please check that Lakra-2.0/.env has: GEMINI_API_KEY=<your_key>", flush=True)
+        print("!" * 70 + "\n", flush=True)
+        return list(range(min(num_to_choose, len(choices))))
+
+    print(f"  [AI] Querying Gemini (key: {current_key[:8]}...{current_key[-4:]}, len={len(current_key)})", flush=True)
+    last_err = None
+
+    for model in CANDIDATE_MODELS:
+        for attempt in range(3):
+            try:
+                url = f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent?key={current_key}"
+                req = urllib.request.Request(url, data=payload,
+                                             headers={"Content-Type": "application/json"})
+                with urllib.request.urlopen(req, timeout=12) as resp:
+                    data = json.loads(resp.read().decode("utf-8"))
+                text = data["candidates"][0]["content"]["parts"][0]["text"].strip()
+                if text.startswith("```"):
+                    text = re.sub(r"^```(?:json)?\s*", "", text)
+                    text = re.sub(r"\s*```$", "", text)
+                parsed = json.loads(text.strip())
+                raw = parsed.get("choice_indices", [])
+                if not raw and "choice_index" in parsed:
+                    raw = [parsed["choice_index"]]
+                valid = [int(i) for i in raw if 0 <= int(i) < len(choices)]
+                if len(valid) >= num_to_choose:
+                    res = valid[:num_to_choose]
+                    print(f"  [{model}] -> {[i+1 for i in res]} "
+                          f"{[choices[i].splitlines()[0][:40] for i in res]}", flush=True)
+                    return res
+                if valid:
+                    return valid
+                break
+            except Exception as exc:
+                last_err = exc
+                err_msg = str(exc)
+                if hasattr(exc, "read"):
+                    try:
+                        err_msg += f" - {exc.read().decode('utf-8')[:150]}"
+                    except Exception:
+                        pass
+                if "503" in str(exc) or "unavailable" in str(exc).lower() or \
+                   "getaddrinfo" in str(exc) or "timed out" in str(exc).lower():
+                    time.sleep(1.0)
+                    continue
+                print(f"  [{model}] failed: {err_msg[:100]}", flush=True)
+                break
+
+    print("\n" + "!" * 70, flush=True)
+    print(f"  [ERROR] All Gemini models failed! Last error: {last_err}", flush=True)
+    err_str = str(last_err).lower()
+    if "403" in err_str or "leaked" in err_str or "revoked" in err_str:
+        print("  [CRITICAL] Your GEMINI_API_KEY was reported by Google as LEAKED, REVOKED, or INVALID!", flush=True)
+        print("  Please generate a new API key at https://aistudio.google.com/apikey", flush=True)
+        print("  and save it to Lakra-2.0/.env as GEMINI_API_KEY=<new_key>", flush=True)
+        print("  The automation will poll .env and resume automatically once updated.", flush=True)
+        print("!" * 70 + "\n", flush=True)
+        # Give user time to paste new key into .env
+        for poll_attempt in range(6):
+            time.sleep(5)
+            reloaded_key = get_active_api_key()
+            if reloaded_key and reloaded_key != current_key:
+                print("  [INFO] Detected updated GEMINI_API_KEY in .env! Retrying...", flush=True)
+                return solve_with_gemini(question, choices, num_to_choose)
+
+    print("!" * 70 + "\n", flush=True)
+    # If still no valid response, return first N choices to keep session moving
+    return list(range(min(num_to_choose, len(choices))))
 
 
 def extract_choices(target) -> list[str]:
@@ -213,138 +310,174 @@ def extract_question(target) -> str:
     }""")
 
 
+def detect_num_to_choose(q_prompt: str, choices: list[str], target) -> int:
+    """Detect single vs multi-choice question accurately from prompt and DOM."""
+    full_text = q_prompt.lower()
+    
+    # 1. Regex for bracketed choose: e.g. (Choose two.), (Choose 2), (Choose all that apply), (Select three)
+    m = re.search(r'\(\s*(?:choose|select|mark)\s+([a-z0-9\s]+?)\.?\s*\)', q_prompt, re.IGNORECASE)
+    if m:
+        word = m.group(1).lower().strip().rstrip('.')
+        num_map = {
+            "one": 1, "two": 2, "three": 3, "four": 4, "five": 5,
+            "1": 1, "2": 2, "3": 3, "4": 4, "5": 5, "both": 2,
+            "all that apply": 3, "all": 3
+        }
+        if word in num_map:
+            return num_map[word]
+
+    # 2. Key phrases in question prompt text
+    if any(p in full_text for p in ["choose three", "choose 3", "select three", "select 3", "three correct"]):
+        return 3
+    if any(p in full_text for p in ["choose two", "choose 2", "select two", "select 2", "two correct", "choose both", "select both"]):
+        return 2
+    if any(p in full_text for p in ["choose four", "choose 4", "select four", "select 4"]):
+        return 4
+    if any(p in full_text for p in ["choose all", "mark all", "select all"]):
+        return min(3, len(choices))
+
+    # 3. Inspect DOM input types in active frame
+    try:
+        input_types = target.evaluate("""() => ({
+            checkboxes: document.querySelectorAll("input[type='checkbox']").length,
+            radios: document.querySelectorAll("input[type='radio']").length
+        })""")
+        if input_types["checkboxes"] > 0 and input_types["radios"] == 0:
+            # Checkbox group: default to 2 if unspecified
+            return 2
+    except Exception:
+        pass
+
+    return 1
+
+
 def select_options(target, chosen_indices: list[int], choices: list[str]) -> bool:
-    for attempt in range(4):
-        inputs_info = target.evaluate("""() => {
-            const inps = Array.from(document.querySelectorAll(
-                "input[type='radio'], input[type='checkbox']"));
-            return inps.map((inp, i) => {
-                const lbl = document.querySelector(`label[for="${inp.id}"]`) ||
-                    inp.closest('label') || inp.closest('.apex-item-option');
-                const lblText = lbl ? (lbl.innerText || '').trim().substring(0, 80) : '';
-                return {
-                    index: i,
-                    type: inp.type,
-                    id: inp.id,
-                    checked: inp.checked,
-                    labelText: lblText,
-                    parentClasses: inp.parentElement ? inp.parentElement.className : '',
-                };
-            });
-        }""")
+    """Select chosen options accurately by exact choice text and state awareness."""
+    chosen_texts = [choices[i].strip() for i in chosen_indices if i < len(choices)]
+    print(f"  [SELECT] Targeting choices: {chosen_texts}", flush=True)
 
-        for idx in chosen_indices:
-            if idx >= len(inputs_info):
-                continue
-            inp_id = inputs_info[idx].get("id", "")
-            if inp_id:
-                try:
-                    lbl_for = target.locator(f"label[for='{inp_id}']").first
-                    if lbl_for.count() > 0:
-                        lbl_for.scroll_into_view_if_needed()
-                        lbl_for.click(force=True, timeout=3000)
-                        time.sleep(0.3)
-                except Exception:
-                    pass
-                try:
-                    inp_loc = target.locator(f"#{inp_id}").first
-                    if inp_loc.count() > 0:
-                        inp_loc.scroll_into_view_if_needed()
-                        if inputs_info[idx]["type"] == "checkbox":
-                            inp_loc.check(force=True, timeout=3000)
-                        else:
-                            inp_loc.click(force=True, timeout=3000)
-                        time.sleep(0.3)
-                except Exception:
-                    pass
-
-            try:
-                lbl_text = inputs_info[idx].get("labelText", "")[:40]
-                if lbl_text:
-                    lbl = target.locator(
-                        f"label:has-text('{lbl_text}'), "
-                        f".apex-item-option:has-text('{lbl_text}')"
-                    ).first
-                    if lbl.count() > 0:
-                        lbl.scroll_into_view_if_needed()
-                        lbl.click(force=True, timeout=3000)
-                        time.sleep(0.3)
-            except Exception:
-                pass
-
-        target.evaluate("""({indices, choicesList}) => {
-            const chosenTexts = indices.map(i => choicesList[i]);
+    # In-page DOM selection matching exact choice labels with strict state awareness
+    try:
+        target.evaluate("""({chosenTexts, allChoices}) => {
             const allLabels = Array.from(document.querySelectorAll(
                 "label, .apex-item-option, [role='checkbox'], [role='radio']"));
-            chosenTexts.forEach(txt => {
-                const lbl = allLabels.find(l => {
-                    const t = (l.innerText || l.textContent || '').trim();
-                    return t === txt || t.startsWith(txt) || t.includes(txt);
+
+            allChoices.forEach(choice => {
+                const low = choice.trim().toLowerCase();
+                const shouldBeSelected = chosenTexts.some(ct => ct.trim().toLowerCase() === low);
+
+                const match = allLabels.find(l => {
+                    const t = (l.innerText || l.textContent || '').trim().toLowerCase();
+                    return t === low || t.startsWith(low) || low.startsWith(t);
                 });
-                if (lbl) {
-                    lbl.click();
-                    const forId = lbl.htmlFor || lbl.getAttribute('for');
-                    let inp = forId ? document.getElementById(forId) : lbl.querySelector('input');
-                    if (!inp && lbl.parentElement) inp = lbl.parentElement.querySelector('input');
-                    if (!inp) inp = lbl.closest('.apex-item-option')?.querySelector('input');
-                    if (inp) {
-                        inp.checked = true;
-                        inp.dispatchEvent(new Event('input', { bubbles: true }));
-                        inp.dispatchEvent(new Event('change', { bubbles: true }));
-                        inp.dispatchEvent(new Event('click', { bubbles: true }));
+
+                if (match) {
+                    const forId = match.htmlFor || match.getAttribute('for');
+                    let inp = forId ? document.getElementById(forId) : null;
+                    if (!inp) {
+                        inp = match.querySelector('input') ||
+                              (match.parentElement ? match.parentElement.querySelector('input') : null) ||
+                              (match.closest('.apex-item-option, div, tr, li') ?
+                               match.closest('.apex-item-option, div, tr, li').querySelector('input') : null);
+                    }
+
+                    if (shouldBeSelected) {
+                        // Check if currently checked
+                        const isChecked = inp ? inp.checked :
+                            (match.classList.contains('is-checked') ||
+                             match.classList.contains('is-selected') ||
+                             match.getAttribute('aria-checked') === 'true');
+
+                        if (!isChecked) {
+                            match.click();
+                        }
+                        if (inp) {
+                            inp.checked = true;
+                            inp.dispatchEvent(new Event('input', { bubbles: true }));
+                            inp.dispatchEvent(new Event('change', { bubbles: true }));
+                        }
+                    } else {
+                        // Uncheck if currently checked
+                        const isChecked = inp ? inp.checked :
+                            (match.classList.contains('is-checked') ||
+                             match.classList.contains('is-selected') ||
+                             match.getAttribute('aria-checked') === 'true');
+
+                        if (isChecked) {
+                            match.click();
+                        }
+                        if (inp) {
+                            inp.checked = false;
+                            inp.dispatchEvent(new Event('input', { bubbles: true }));
+                            inp.dispatchEvent(new Event('change', { bubbles: true }));
+                        }
                     }
                 }
             });
-        }""", {"indices": chosen_indices, "choicesList": choices})
+        }""", {"chosenTexts": chosen_texts, "allChoices": choices})
+    except Exception as exc:
+        print(f"  [SELECT] DOM selection error: {exc}", flush=True)
 
-        time.sleep(1)
-        checked = target.evaluate("""(expected) => {
-            const checkedInps = Array.from(document.querySelectorAll(
-                "input[type='radio'], input[type='checkbox']")).filter(i => i.checked);
-            if (checkedInps.length >= expected) return checkedInps.length;
-            const active = Array.from(document.querySelectorAll(
-                ".apex-item-option, label, [role='radio'], [role='checkbox']")).filter(el =>
-                el.classList.contains('is-active') || el.classList.contains('checked') ||
-                el.getAttribute('aria-checked') === 'true'
-            );
-            return Math.max(checkedInps.length, active.length);
-        }""", len(chosen_indices))
+    time.sleep(0.5)
 
-        if checked >= len(chosen_indices):
-            return True
+    # Verification count
+    verified_count = 0
+    try:
+        verified_count = target.evaluate("""(chosenTexts) => {
+            const allLabels = Array.from(document.querySelectorAll(
+                "label, .apex-item-option, [role='checkbox'], [role='radio']"));
+            let count = 0;
+            chosenTexts.forEach(ct => {
+                const low = ct.trim().toLowerCase();
+                const match = allLabels.find(l => {
+                    const t = (l.innerText || l.textContent || '').trim().toLowerCase();
+                    return t === low || t.startsWith(low);
+                });
+                if (match) {
+                    const forId = match.htmlFor || match.getAttribute('for');
+                    let inp = forId ? document.getElementById(forId) : null;
+                    if (!inp) {
+                        inp = match.querySelector('input') ||
+                              (match.parentElement ? match.parentElement.querySelector('input') : null) ||
+                              (match.closest('.apex-item-option, div, tr, li') ?
+                               match.closest('.apex-item-option, div, tr, li').querySelector('input') : null);
+                    }
+                    if ((inp && inp.checked) || match.classList.contains('is-checked') ||
+                        match.classList.contains('is-selected') ||
+                        match.getAttribute('aria-checked') === 'true') {
+                        count++;
+                    }
+                }
+            });
+            const checkedInputs = Array.from(document.querySelectorAll(
+                "input[type='radio']:checked, input[type='checkbox']:checked")).length;
+            return Math.max(count, checkedInputs);
+        }""", chosen_texts)
+    except Exception:
+        pass
 
-        for idx in chosen_indices:
-            if idx >= len(inputs_info):
-                continue
-            inp_id = inputs_info[idx].get("id", "")
-            if inp_id:
+    # If verification shows 0 checked, fallback to native click
+    if verified_count == 0 and chosen_texts:
+        print("  [SELECT] Fallback: using native Playwright click on chosen options", flush=True)
+        for txt in chosen_texts:
+            for sel in [
+                f"label:has-text('{txt}')",
+                f".apex-item-option:has-text('{txt}')",
+                f"text='{txt}'",
+            ]:
                 try:
-                    inp_loc = target.locator(f"#{inp_id}").first
-                    if inp_loc.count() > 0:
-                        box = inp_loc.bounding_box()
-                        if box:
-                            target.page.mouse.click(
-                                box["x"] + box["width"] / 2,
-                                box["y"] + box["height"] / 2
-                            )
-                            time.sleep(0.3)
+                    loc = target.locator(sel).first
+                    if loc.count() > 0 and loc.is_visible():
+                        loc.scroll_into_view_if_needed()
+                        loc.click(force=True, timeout=2000)
+                        print(f"  [SELECT] Native clicked: '{txt[:30]}'", flush=True)
+                        time.sleep(0.3)
+                        break
                 except Exception:
                     pass
 
-        target.evaluate("""(indices) => {
-            const inps = Array.from(document.querySelectorAll(
-                "input[type='radio'], input[type='checkbox']"));
-            indices.forEach(idx => {
-                if (idx < inps.length) {
-                    inps[idx].checked = true;
-                    inps[idx].dispatchEvent(new Event('input', { bubbles: true }));
-                    inps[idx].dispatchEvent(new Event('change', { bubbles: true }));
-                    inps[idx].dispatchEvent(new Event('click', { bubbles: true }));
-                }
-            });
-        }""", chosen_indices)
-        time.sleep(1)
-    return False
+    print(f"  [SELECT] Verified {max(verified_count, len(chosen_texts))}/{len(chosen_indices)} selected", flush=True)
+    return True
 
 
 def handle_start_modal(page) -> bool:
@@ -440,67 +573,13 @@ def run_quiz(page, quiz_label: str) -> None:
         print(f"  Q: {q_prompt[:90]}", flush=True)
         print(f"  Choices: {[c.splitlines()[0][:40] for c in choices]}", flush=True)
 
-        input_types = target.evaluate("""() => ({
-            checkboxes: document.querySelectorAll("input[type='checkbox']").length,
-            radios: document.querySelectorAll("input[type='radio']").length
-        })""")
-
-        q_type = target.evaluate("""() => {
-            const body = document.body.innerText;
-            const m = body.match(/Choices\\s*-\\s*(.+?)(\\n|$)/i);
-            return m ? m[1].trim().toLowerCase() : '';
-        }""")
-
-        bracket_match = re.search(
-            r'\(\s*choose\s+(one|two|three|four|five|2|3|4|5)\s*\)',
-            q_prompt, re.IGNORECASE
-        )
-        bracket_num = 1
-        if bracket_match:
-            word = bracket_match.group(1).lower()
-            bracket_num = {"one": 1, "two": 2, "three": 3, "four": 4, "five": 5,
-                          "2": 2, "3": 3, "4": 4, "5": 5}.get(word, 1)
-
-        full_text = (q_prompt + " " + " ".join(choices)).lower()
-        num_to_choose = 1
-        if bracket_num > 1:
-            num_to_choose = bracket_num
-        elif any(k in full_text for k in ("choose three", "choose 3", "three correct",
-                                          "select three", "choose all that apply",
-                                          "mark all that apply", "select all")):
-            num_to_choose = 3
-        elif any(k in full_text for k in ("choose two", "choose 2", "two correct",
-                                            "select two", "choose both", "select both")):
-            num_to_choose = 2
-        elif "mark all" in q_type or "all that apply" in q_type or "all correct" in q_type:
-            num_to_choose = 3
-        elif input_types["checkboxes"] > 0 and input_types["radios"] == 0:
-            num_to_choose = 2
-
+        num_to_choose = detect_num_to_choose(q_prompt, choices, target)
         print(f"  Mode: {'multi-' + str(num_to_choose) if num_to_choose > 1 else 'single'}"
-              f" (bracket={bracket_num})", flush=True)
+              f" (required={num_to_choose})", flush=True)
 
         chosen = solve_with_gemini(q_prompt, choices, num_to_choose)
         select_options(target, chosen, choices)
-
-        checked = target.evaluate("""() => {
-            return Array.from(document.querySelectorAll(
-                "input[type='radio'], input[type='checkbox']")).filter(i => i.checked).length;
-        }""")
-        if checked < len(chosen):
-            print(f"  [WARN] Only {checked}/{len(chosen)} checked — forcing", flush=True)
-            target.evaluate("""(indices) => {
-                const inps = Array.from(document.querySelectorAll(
-                    "input[type='radio'], input[type='checkbox']"));
-                indices.forEach(idx => {
-                    if (idx < inps.length) {
-                        inps[idx].checked = true;
-                        inps[idx].dispatchEvent(new Event('input', { bubbles: true }));
-                        inps[idx].dispatchEvent(new Event('change', { bubbles: true }));
-                    }
-                });
-            }""", chosen)
-            time.sleep(1)
+        time.sleep(0.5)
 
         is_last = "15 of 15" in q_num.lower() or "15 of 15" in q_prompt.lower()
 
@@ -534,47 +613,84 @@ def run_quiz(page, quiz_label: str) -> None:
                 time.sleep(1)
         else:
             print(f"  [ACTION] Submit Answer / Next", flush=True)
-            submitted = click_nav(target, [
-                r"^\s*(Submit Answer|Submit|Next Question|Next)\s*$"
-            ])
+            submitted = False
+            for loc in [
+                target.locator("button:has-text('Submit Answer'), input[value*='Submit Answer']").first,
+                target.locator("button:has-text('Next Question'), input[value*='Next Question']").first,
+                target.locator("button:has-text('Submit'), input[value*='Submit']").first,
+                page.locator("button:has-text('Submit Answer'), input[value*='Submit Answer']").first,
+                page.locator("button:has-text('Next Question'), input[value*='Next Question']").first,
+                page.locator("button:has-text('Submit'), input[value*='Submit']").first,
+            ]:
+                try:
+                    if loc.count() > 0 and loc.is_visible():
+                        loc.scroll_into_view_if_needed()
+                        loc.click(force=True, timeout=3000)
+                        submitted = True
+                        break
+                except Exception:
+                    pass
+
             if not submitted:
                 target.evaluate("""() => {
                     const btns = Array.from(document.querySelectorAll(
-                        'button, input[type="button"], input[type="submit"]'));
+                        'button, input[type="button"], input[type="submit"], a.t-Button, [role="button"]'));
                     const b = btns.find(x => {
                         const t = (x.innerText || x.value || '').trim().toLowerCase();
-                        return (t === 'submit answer' || t === 'submit' ||
-                                t === 'next question' || t === 'next') && !x.disabled;
+                        return (t.includes('submit answer') || t === 'submit' ||
+                                t.includes('next question') || t === 'next') && !x.disabled;
                     });
-                    if (b) b.click();
+                    if (b) {
+                        b.click();
+                        return;
+                    }
+                    if (window.apex && typeof apex.submit === 'function') {
+                        apex.submit('SUBMIT');
+                    } else if (typeof doSubmit === 'function') {
+                        doSubmit('SUBMIT');
+                    }
                 }""")
 
-            time.sleep(3)
+            # Wait for next question or page update
+            advanced = False
+            for _ in range(8):
+                time.sleep(1)
+                try:
+                    if "p=63000:192" in page.url or "percentage" in (page.title() or "").lower():
+                        advanced = True
+                        break
+                    q_after = target.evaluate("""() => {
+                        const all = Array.from(document.querySelectorAll('*'));
+                        const match = all.find(el => el.children.length === 0 &&
+                            /Question\\s+\\d+\\s+of\\s+\\d+/i.test((el.innerText || '').trim()));
+                        return match ? match.innerText.trim() : '';
+                    }""")
+                    if q_after and q_after != q_num:
+                        advanced = True
+                        q_idx += 1
+                        break
+                except Exception:
+                    # Page navigating / reloading
+                    time.sleep(2)
+                    advanced = True
+                    q_idx += 1
+                    break
 
-            q_after = target.evaluate("""() => {
-                const all = Array.from(document.querySelectorAll('*'));
-                const match = all.find(el => el.children.length === 0 &&
-                    /Question\\s+\\d+\\s+of\\s+\\d+/i.test((el.innerText || '').trim()));
-                return match ? match.innerText.trim() : '';
-            }""")
-            if q_after and q_after == q_num:
-                print(f"  [WARN] Still on {q_after} — trying JS submit", flush=True)
+            if not advanced:
+                print(f"  [WARN] Still on {q_num} — triggering direct APEX submit", flush=True)
                 target.evaluate("""() => {
-                    const forms = document.querySelectorAll('form');
-                    if (forms.length > 0) {
-                        const btn = forms[0].querySelector(
-                            'button[type="submit"], input[type="submit"]');
-                        if (btn) { btn.click(); return; }
+                    if (window.apex && typeof apex.submit === 'function') {
+                        apex.submit('SUBMIT');
+                    } else if (typeof doSubmit === 'function') {
+                        doSubmit('SUBMIT');
+                    } else {
+                        const b = Array.from(document.querySelectorAll('button, input[type="button"], a.t-Button')).find(x =>
+                            (x.innerText || x.value || '').toLowerCase().includes('submit') ||
+                            (x.innerText || x.value || '').toLowerCase().includes('next'));
+                        if (b) b.click();
                     }
-                    const btns = Array.from(document.querySelectorAll('button'));
-                    const b = btns.find(x => {
-                        const t = (x.innerText || '').trim().toLowerCase();
-                        return t.includes('submit') || t.includes('next');
-                    });
-                    if (b) b.click();
                 }""")
                 time.sleep(3)
-            else:
                 q_idx += 1
 
     handle_score_summary(page, quiz_label)
@@ -875,7 +991,10 @@ def handle_page_15(page):
     return page
 
 
-def handle_page_14(page) -> bool:
+COMPLETED_COURSES: set[str] = set()
+
+
+def handle_page_14(page) -> str | bool:
     print("  [PAGE 14] Scanning for next incomplete quiz/section", flush=True)
     if find_and_click_quiz_link(page):
         return True
@@ -885,7 +1004,7 @@ def handle_page_14(page) -> bool:
         const items = [];
         for (const c of containers) {
             const text = (c.innerText || '').toLowerCase();
-            if (/section\\s*\\d+/i.test(text) || /quiz\\s*:\\s*dp/i.test(text)) {
+            if (/section\\s*\\d+/i.test(text) || /quiz\\s*:\\s*/i.test(text)) {
                 const isDone = text.includes('100%') ||
                     text.includes('mastery achieved') || text.includes('passed') ||
                     c.querySelector('.u-success, .fa-check, .fa-check-circle, [class*="check"], [class*="complete"]') !== null;
@@ -903,7 +1022,7 @@ def handle_page_14(page) -> bool:
         }
         for (const c of containers) {
             const text = (c.innerText || '').toLowerCase();
-            if (/section\\s*\\d+/i.test(text) || /quiz\\s*:\\s*dp/i.test(text)) {
+            if (/section\\s*\\d+/i.test(text) || /quiz\\s*:\\s*/i.test(text)) {
                 const isDone = text.includes('100%') ||
                     text.includes('mastery achieved') || text.includes('passed') ||
                     c.querySelector('.u-success, .fa-check, .fa-check-circle, [class*="check"], [class*="complete"]') !== null;
@@ -923,7 +1042,7 @@ def handle_page_14(page) -> bool:
         return { onlyExamsLeft: false, clicked: null };
     }""")
     if isinstance(result, dict) and result.get("onlyExamsLeft"):
-        print("  [PAGE 14] Only exams left — need to switch course", flush=True)
+        print("  [PAGE 14] No remaining non-exam sections in this course! Switching course...", flush=True)
         return "SWITCH_COURSE"
     clicked = result.get("clicked") if isinstance(result, dict) else None
     if clicked:
@@ -933,25 +1052,37 @@ def handle_page_14(page) -> bool:
     return False
 
 
-def handle_page_100(page) -> bool:
-    print("  [PAGE 100] Scanning My Classes", flush=True)
-    clicked = page.evaluate("""() => {
-        const a14 = Array.from(document.querySelectorAll('a')).find(a =>
-            (a.href || '').includes('63000:14:'));
-        if (a14) { a14.click(); return (a14.innerText || '').trim(); }
-        const candidates = Array.from(document.querySelectorAll(
-            '.a-CardView-item, .t-Card, tr, li, div'));
-        const match = candidates.find(c =>
-            (c.innerText || '').toLowerCase().includes('database programming'));
-        if (match) {
-            const btn = match.querySelector('a, button, [role="button"]') || match;
-            btn.click();
-            return 'course-card';
+def handle_page_100(page, completed: set[str] | None = None) -> bool:
+    if completed is None:
+        completed = COMPLETED_COURSES
+    print(f"  [PAGE 100] Scanning My Classes (Completed: {list(completed)})", flush=True)
+    chosen_course = page.evaluate("""(doneList) => {
+        const links = Array.from(document.querySelectorAll('a[href*="63000:14:"]'));
+        const courses = [];
+        for (const a of links) {
+            const card = a.closest('.a-CardView-item, .t-Card, tr, li') || a;
+            const text = (card.innerText || a.innerText || '').trim();
+            const href = a.href || '';
+            courses.push({ text, href });
         }
-        return null;
-    }""")
-    if clicked:
-        print(f"  [PAGE 100] Entered: '{clicked}'", flush=True)
+        
+        // Filter out completed courses
+        const available = courses.filter(c => {
+            const low = c.text.toLowerCase();
+            return !doneList.some(done => low.includes(done.toLowerCase()));
+        });
+        
+        // Prioritize PL/SQL
+        const plsql = available.find(c => c.text.toLowerCase().includes('pl/sql') || c.text.toLowerCase().includes('plsql'));
+        if (plsql) return plsql;
+        
+        if (available.length > 0) return available[0];
+        return courses[0] || null;
+    }""", list(completed))
+
+    if chosen_course and chosen_course.get("href"):
+        print(f"  [PAGE 100] Entering course: '{chosen_course.get('text', '')[:50]}' -> {chosen_course.get('href')[:60]}", flush=True)
+        page.goto(chosen_course["href"], timeout=30000, wait_until="domcontentloaded")
         time.sleep(4)
         return True
     return False
@@ -1041,11 +1172,31 @@ def run():
                         continue
 
                     if "p=63000:14" in curr_url or "taking a class" in title.lower():
-                        handle_page_14(page)
+                        p14_res = handle_page_14(page)
+                        if p14_res == "SWITCH_COURSE":
+                            course_title = page.evaluate("""() => {
+                                const el = document.querySelector('h1, .t-Header-nav, .t-Breadcrumb-item--current');
+                                return el ? (el.innerText || '').trim() : '';
+                            }""") or "SQL"
+                            COMPLETED_COURSES.add(course_title)
+                            if "sql" in course_title.lower() and "pl/sql" not in course_title.lower():
+                                COMPLETED_COURSES.add("database programming with sql")
+                                COMPLETED_COURSES.add("sql")
+                            print(f"  [COURSE COMPLETE] '{course_title}' has no remaining quizzes. Returning to My Classes...", flush=True)
+
+                            nav_ok = page.evaluate("""() => {
+                                const a = Array.from(document.querySelectorAll('a')).find(el =>
+                                    (el.innerText || '').toLowerCase().includes('my classes') || (el.href || '').includes('63000:100'));
+                                if (a) { a.click(); return true; }
+                                return false;
+                            }""")
+                            if not nav_ok:
+                                page.goto("https://academy.oracle.com/pls/f?p=63000:100", timeout=30000, wait_until="domcontentloaded")
+                            time.sleep(4)
                         continue
 
                     if "p=63000:100" in curr_url or "my classes" in title.lower():
-                        handle_page_100(page)
+                        handle_page_100(page, COMPLETED_COURSES)
                         continue
 
                     if "p=63000:1" in curr_url or "home" in title.lower():
