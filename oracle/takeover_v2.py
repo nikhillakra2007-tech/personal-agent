@@ -1174,6 +1174,23 @@ def handle_page_100(page, completed: set[str] | None = None) -> bool:
     return False
 
 
+def cleanup_stale_profile_locks(profile_dir: Path):
+    """Remove stale locks and clean up lingering lock files if previous process crashed."""
+    lock_files = [
+        profile_dir / ".lakra-profile.lock",
+        profile_dir / "SingletonLock",
+        profile_dir / "SingletonCookie",
+        profile_dir / "SingletonSocket",
+        profile_dir / "lockfile",
+    ]
+    for lf in lock_files:
+        try:
+            if lf.exists():
+                lf.unlink(missing_ok=True)
+        except Exception:
+            pass
+
+
 def run():
     SHOTS_DIR.mkdir(parents=True, exist_ok=True)
     print("=" * 60, flush=True)
@@ -1182,18 +1199,35 @@ def run():
 
     from playwright.sync_api import sync_playwright
 
+    cleanup_stale_profile_locks(PROFILE_DIR)
+
     with sync_playwright() as pw:
-        context = pw.chromium.launch_persistent_context(
-            str(PROFILE_DIR),
-            headless=False,
-            viewport={"width": 1280, "height": 850},
-            args=[
-                "--disable-blink-features=AutomationControlled",
-                f"--host-resolver-rules={HOST_RESOLVER_RULES}",
-                "--enable-features=DnsOverHttps",
-                "--dns-over-https-mode=automatic",
-            ],
-        )
+        args = [
+            "--disable-blink-features=AutomationControlled",
+            f"--host-resolver-rules={HOST_RESOLVER_RULES}",
+            "--enable-features=DnsOverHttps",
+            "--dns-over-https-mode=automatic",
+        ]
+        try:
+            context = pw.chromium.launch_persistent_context(
+                str(PROFILE_DIR),
+                headless=False,
+                viewport={"width": 1280, "height": 850},
+                args=args,
+            )
+        except Exception as exc:
+            if "ProcessSingleton" in str(exc):
+                print("  [WARN] Chromium profile locked by another process. Cleaning up and retrying...", flush=True)
+                cleanup_stale_profile_locks(PROFILE_DIR)
+                time.sleep(2)
+                context = pw.chromium.launch_persistent_context(
+                    str(PROFILE_DIR),
+                    headless=False,
+                    viewport={"width": 1280, "height": 850},
+                    args=args,
+                )
+            else:
+                raise
         page = context.pages[0] if context.pages else context.new_page()
 
         try:
