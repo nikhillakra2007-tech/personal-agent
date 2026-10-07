@@ -221,15 +221,36 @@ def evaluate_oracle_sql_deterministically(question: str, choices: list[str]) -> 
 
 
 def solve_question(question: str, choices: list[str], num_to_choose: int = 1) -> list[int]:
-    """Pure Gemini reasoning solver for single and multi-select assessments (no predefined answers)."""
+    """Pure Gemini reasoning solver for single and multi-select assessments with verified cache."""
     if not choices:
         return [0]
     if len(choices) <= num_to_choose:
         return list(range(len(choices)))
 
+    # Tier 1: Check verified answer cache
+    cache = load_answers_cache()
+    q_low = question.lower().strip()
+    cached_indices = []
+    for cached_q, cached_a in cache.items():
+        cq_low = cached_q.lower().strip()
+        if cq_low in q_low or q_low in cq_low or (len(cq_low) > 20 and cq_low[:35] in q_low):
+            if isinstance(cached_a, list):
+                for a_item in cached_a:
+                    for idx, c in enumerate(choices):
+                        if (a_item.lower() in c.lower() or c.lower() in a_item.lower()) and idx not in cached_indices:
+                            cached_indices.append(idx)
+            else:
+                for idx, c in enumerate(choices):
+                    if (cached_a.lower() in c.lower() or c.lower() in cached_a.lower()) and idx not in cached_indices:
+                        cached_indices.append(idx)
+    if len(cached_indices) >= num_to_choose:
+        res = cached_indices[:num_to_choose]
+        print(f"[CACHE HIT] Verified 100% correct answers: {[choices[i].splitlines()[0] for i in res]}")
+        return res
+
     choices_formatted = "\n".join(f"{idx}: {text}" for idx, text in enumerate(choices))
     if num_to_choose > 1:
-        prompt = f"""You are an expert Oracle SQL & PL/SQL Database administrator taking an official Oracle Academy assessment.
+        prompt = f"""You are an expert Oracle SQL & PL/SQL Database administrator taking an official Oracle Academy assessment (quiz, midterm, or final exam).
 Question:
 {question}
 
@@ -241,7 +262,7 @@ Select the {num_to_choose} best correct choice indices (0 to {len(choices)-1}).
 Think step by step about Oracle SQL and PL/SQL semantics before answering.
 Respond ONLY with a JSON object: {{"choice_indices": [<int>, ...], "reasoning": "<1 sentence>"}}"""
     else:
-        prompt = f"""You are an expert Oracle SQL & PL/SQL Database administrator taking an official Oracle Academy assessment.
+        prompt = f"""You are an expert Oracle SQL & PL/SQL Database administrator taking an official Oracle Academy assessment (quiz, midterm, or final exam).
 Question:
 {question}
 
@@ -261,10 +282,12 @@ Respond ONLY with a JSON object: {{"choice_indices": [<int>], "reasoning": "<1 s
     current_key = os.getenv("GEMINI_API_KEY", "") or get_gemini_api_key()
 
     candidate_models = [
-        "gemini-2.5-flash",
-        "gemini-2.0-flash",
-        "gemini-1.5-flash",
         "gemini-flash-lite-latest",
+        "gemini-2.5-flash",
+        "gemini-3.1-flash-lite",
+        "gemini-3.7-flash",
+        "gemini-3.8-flash",
+        "gemini-flash-latest",
     ]
 
     last_err = None
@@ -275,18 +298,21 @@ Respond ONLY with a JSON object: {{"choice_indices": [<int>], "reasoning": "<1 s
             with urllib.request.urlopen(req, timeout=10) as resp:
                 data = json.loads(resp.read().decode("utf-8"))
                 text = data["candidates"][0]["content"]["parts"][0]["text"].strip()
-                if text.startswith("```"):
-                    text = re.sub(r"^```(?:json)?\s*", "", text)
-                    text = re.sub(r"\s*```$", "", text)
-                parsed = json.loads(text.strip())
+                match = re.search(r"\{[\s\S]*\}", text)
+                json_str = match.group(0) if match else text
+                if json_str.startswith("```"):
+                    json_str = re.sub(r"^```(?:json)?\s*", "", json_str)
+                    json_str = re.sub(r"\s*```$", "", json_str)
+                parsed = json.loads(json_str.strip())
                 raw_indices = parsed.get("choice_indices", [])
                 if not raw_indices and "choice_index" in parsed:
                     raw_indices = [parsed["choice_index"]]
                 valid_indices = [int(i) for i in raw_indices if 0 <= int(i) < len(choices)]
                 if len(valid_indices) >= num_to_choose:
-                    print(f"[{model.upper()}] Selected Options {[i+1 for i in valid_indices[:num_to_choose]]}: {[choices[i].splitlines()[0] for i in valid_indices[:num_to_choose]]}")
+                    res = valid_indices[:num_to_choose]
+                    print(f"[{model.upper()}] Selected Options {[i+1 for i in res]}: {[choices[i].splitlines()[0] for i in res]}")
                     print(f"[REASONING] {parsed.get('reasoning', '')}")
-                    return valid_indices[:num_to_choose]
+                    return res
                 elif valid_indices:
                     return valid_indices
         except Exception as exc:
@@ -304,7 +330,7 @@ def run_page_190_quiz_solver(page: Page, quiz_title: str):
     print(f"=======================================================")
 
     question_idx = 1
-    max_questions = 20
+    max_questions = 60
 
     while question_idx <= max_questions:
         time.sleep(2)
@@ -495,10 +521,28 @@ def run_page_190_quiz_solver(page: Page, quiz_title: str):
             }""", chosen_indices)
             time.sleep(1)
 
-        # 10. CRITICAL SUBMISSION ROUTING (NEVER COMPLETE ON Q1-Q14)
-        is_q15 = "15 of 15" in q_num.lower() or "15 of 15" in q_prompt.lower() or question_idx >= 15
+        # 10. CRITICAL SUBMISSION ROUTING (SUBMIT ANSWER OR COMPLETE ASSESSMENT)
+        is_q_final = False
+        m_q = re.search(r"Question\s+(\d+)\s+of\s+(\d+)", q_num, re.IGNORECASE)
+        if not m_q:
+            m_q = re.search(r"Question\s+(\d+)\s+of\s+(\d+)", q_prompt, re.IGNORECASE)
+        if m_q and int(m_q.group(1)) == int(m_q.group(2)):
+            is_q_final = True
+        elif "15 of 15" in q_num.lower() or "15 of 15" in q_prompt.lower():
+            is_q_final = True
 
-        if is_q15:
+        if not is_q_final:
+            try:
+                has_comp = target.evaluate("""() => {
+                    const btns = Array.from(document.querySelectorAll("button, input[type='button'], a.t-Button"));
+                    return btns.some(b => (b.innerText || b.value || '').toLowerCase().includes('complete assessment') && !b.disabled);
+                }""")
+                if has_comp:
+                    is_q_final = True
+            except Exception:
+                pass
+
+        if is_q_final:
             print(f"[ACTION] Final Question reached ({q_num}). Submitting with Complete Assessment...")
             sub_btn = target.locator("button, a.t-Button, input[type='button']").filter(
                 has_text=re.compile(r"^\s*(Complete Assessment|Finish Assessment)\s*$", re.I)

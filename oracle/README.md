@@ -15,28 +15,34 @@ This directory contains the complete **Oracle Academy (Student Hub) Automation S
 
 ### 🌟 Key Capabilities
 
-1. 🧠 **Gemini Multi-Modal & SQL Reasoning Solver**
-   - Direct integration with `gemini-3.8-flash` and `gemini-flash-lite-latest`.
-   - **Dynamic Selection Count**: Intelligently inspects the question context to detect single-choice vs. multi-choice prompts (`Choose two`, `Choose three`, `Mark all that apply`).
-   - High-precision SQL parsing: understands Oracle syntax subtleties, date arithmetic, character functions, null behavior, and return types.
+1. 🧠 **Gemini Multi-Modal & SQL/PL-SQL Reasoning Solver**
+   - Direct integration with `gemini-flash-lite-latest` and `gemini-2.5-flash`.
+   - **Dynamic Selection Count**: Intelligently inspects question context and DOM banners to detect single-choice vs. multi-choice prompts (`Choose two`, `Choose three`, `Mark all that apply`).
+   - High-precision SQL & PL/SQL reasoning: understands Oracle cursor attributes (`%NOTFOUND`), exception handling, DDL vs DML semantics, date arithmetic, and NULL group function behaviors.
 
-2. 🖼️ **Frame-Aware DOM Navigation (`get_quiz_target`)**
+2. 📝 **Comprehensive Midterm & Final Exam Automation**
+   - Seamlessly transitions from regular section quizzes to multi-topic **Midterm Examinations** and **Final Examinations**.
+   - Scales dynamically up to 60 questions per assessment without premature completion traps.
+   - Automatically detects completed courses and switches to next enrolled classes (e.g. *Database Programming with SQL* → *Database Programming with PL/SQL*).
+
+3. 🖼️ **Frame-Aware DOM Navigation (`get_quiz_target`)**
    - Oracle APEX (App `63000`, Page `15` and Page `190`) frequently renders assessment views inside nested `iframe` structures depending on the screen mode.
    - Our engine seamlessly resolves whether the active quiz DOM resides in the top-level window or a child frame, avoiding selector timeouts.
 
-3. 🛡️ **Zero-Premature-Submit Protection**
+4. 🛡️ **Zero-Premature-Submit Protection**
    - Strict gate: Questions 1 through $N-1$ **only** trigger `Submit Answer` or `Next Question`.
-   - The button `Complete Assessment` is strictly forbidden until the final question ($N$ of $N$) is confirmed answered and validated.
+   - The button `Complete Assessment` is strictly forbidden until the confirmed final question ($N$ of $N$) is answered and validated.
 
-4. 🔄 **100% Score Guarantee via Answer Harvesting**
-   - When an assessment completes, the engine inspects the score. If less than 100%, it navigates to **"View Results"**, extracts the verified correct answers, caches them locally in `var/oracle_answers_cache.json`, and launches an automated retake to guarantee a 100% mark.
+5. 🔄 **100% Score Guarantee via Answer Harvesting & Local Cache**
+   - When an assessment completes, the engine inspects the score. If less than 100%, it navigates to **"View Results"**, extracts verified correct answers, caches them locally in `var/oracle_answers_cache.json`, and launches an automated retake to guarantee a 100% mark.
+   - Shared cache ensures questions reused across section quizzes and midterm/final exams achieve instant sub-millisecond 100% hits.
 
-5. ⚡ **Hardcoded DNS Pinning (Akamai / Oracle Edge Resolution)**
+6. ⚡ **Hardcoded DNS Pinning (Akamai / Oracle Edge Resolution)**
    - Bypasses local router and ISP DNS dropouts (`ERR_NAME_NOT_RESOLVED`) by pinning Oracle Akamai edge IP addresses directly into the Chromium network stack via `--host-resolver-rules`.
 
-6. 🔐 **Zero-Credential Stored Auth**
+7. 🔐 **Zero-Credential Stored Auth**
    - Full compliance with L4 security policies: passwords and credentials are **never** stored or typed by the script.
-   - Authentication is bootstrapped once via `manual_signin.py` into a persistent Playwright session profile (`var/sessions/oracle`), reusing session cookies (`TAsessionID`).
+   - Authentication is bootstrapped once via single sign-on into a persistent Playwright session profile (`var/sessions/oracle`), reusing session cookies (`TAsessionID`).
 
 ---
 

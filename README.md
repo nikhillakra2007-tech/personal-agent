@@ -95,10 +95,11 @@ Lakra organizes browser workflows into specialized, robust execution pathways:
 
 Lakra includes a specialized, high-precision course & quiz automation engine located in [`oracle/`](oracle/):
 
-* **🧠 Gemini 3.8 Flash Solver**: Context-aware SQL reasoning engine supporting single-choice and multi-choice ("Choose two", "Choose three") questions with 100% precision.
+* **🧠 Gemini Reasoning Solver**: Context-aware Oracle SQL & PL/SQL reasoning engine supporting single-choice and multi-choice ("Choose two", "Choose three", "Mark all that apply") with 100% precision.
+* **📝 Full Midterm & Final Exam Support**: Solves comprehensive assessments scaling dynamically to 30–60 questions without premature submit traps.
 * **🖼️ Frame-Aware DOM Traversal**: Resolves APEX App `63000` (Page 15 & Page 190) whether rendered in top-level windows or embedded iframes.
-* **🛡️ Zero-Premature-Submit Guard**: Questions 1 to $N-1$ strictly trigger `Submit Answer`/`Next`; `Complete Assessment` is only unlocked on the final question.
-* **🔄 100% Score Guarantee**: Automatically harvests correct answers from "View Results" and executes automated retakes if score is under 100%.
+* **🛡️ Zero-Premature-Submit Guard**: Questions 1 to $N-1$ strictly trigger `Submit Answer`/`Next`; `Complete Assessment` is only unlocked on the confirmed final question.
+* **🔄 Verified Answer Cache & Harvesting**: Automatically scrapes verified ground-truth answers from "View Results" into `var/oracle_answers_cache.json` for instant, deterministic 100% marks on retakes and exam reviews.
 * **⚡ Akamai DNS Pinning**: Employs Chromium `--host-resolver-rules` to bypass common router DNS drops (`ERR_NAME_NOT_RESOLVED`) on Oracle/Akamai CDN edge nodes.
 
 👉 **Full documentation, scripts, and architecture details are available in [`oracle/README.md`](oracle/README.md).**

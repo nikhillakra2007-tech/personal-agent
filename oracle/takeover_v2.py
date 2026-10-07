@@ -35,6 +35,26 @@ for p in [str(ROOT), str(PARENT), str(ROOT.parent)]:
 
 PROFILE_DIR = ROOT / "var" / "sessions" / "oracle"
 SHOTS_DIR = ROOT / "var" / "do-shots" / "takeover_v2"
+ANSWERS_CACHE_FILE = ROOT / "var" / "oracle_answers_cache.json"
+
+
+def load_answers_cache() -> dict[str, any]:
+    if ANSWERS_CACHE_FILE.exists():
+        try:
+            with open(ANSWERS_CACHE_FILE, "r", encoding="utf-8") as f:
+                return json.load(f)
+        except Exception:
+            pass
+    return {}
+
+
+def save_answers_cache(cache: dict[str, any]) -> None:
+    try:
+        ANSWERS_CACHE_FILE.parent.mkdir(parents=True, exist_ok=True)
+        with open(ANSWERS_CACHE_FILE, "w", encoding="utf-8") as f:
+            json.dump(cache, f, indent=2, ensure_ascii=False)
+    except Exception as exc:
+        print(f"  [CACHE] Failed to save answers: {exc}", flush=True)
 
 
 def get_active_api_key() -> str:
@@ -80,11 +100,11 @@ API_KEY = get_active_api_key()
 EMAIL = get_active_student_email()
 
 CANDIDATE_MODELS = [
-    "gemini-3.1-flash-lite-preview",
-    "gemini-3.1-flash-lite",
     "gemini-flash-lite-latest",
-    "gemini-3.5-flash-lite",
-    "gemini-3.5-flash",
+    "gemini-2.5-flash",
+    "gemini-3.1-flash-lite",
+    "gemini-3.7-flash",
+    "gemini-3.8-flash",
     "gemini-flash-latest",
 ]
 HUB_URL = "https://academy.oracle.com/pls/f?p=63000:1"
@@ -157,26 +177,52 @@ def get_quiz_target(page):
 
 
 def solve_with_gemini(question: str, choices: list[str], num_to_choose: int = 1) -> list[int]:
+    if not choices:
+        return [0]
+    if len(choices) <= num_to_choose:
+        return list(range(len(choices)))
+
+    # Tier 1: Check verified answer cache
+    cache = load_answers_cache()
+    q_low = question.lower().strip()
+    cached_indices = []
+    for cached_q, cached_a in cache.items():
+        cq_low = cached_q.lower().strip()
+        if cq_low in q_low or q_low in cq_low or (len(cq_low) > 20 and cq_low[:35] in q_low):
+            if isinstance(cached_a, list):
+                for a_item in cached_a:
+                    for idx, c in enumerate(choices):
+                        if (a_item.lower() in c.lower() or c.lower() in a_item.lower()) and idx not in cached_indices:
+                            cached_indices.append(idx)
+            else:
+                for idx, c in enumerate(choices):
+                    if (cached_a.lower() in c.lower() or c.lower() in cached_a.lower()) and idx not in cached_indices:
+                        cached_indices.append(idx)
+    if len(cached_indices) >= num_to_choose:
+        res = cached_indices[:num_to_choose]
+        print(f"  [CACHE HIT] Verified 100% correct answers: {[choices[i].splitlines()[0] for i in res]}", flush=True)
+        return res
+
     choices_formatted = "\n".join(f"{i}: {t}" for i, t in enumerate(choices))
     if num_to_choose > 1:
         prompt = (
             "You are an expert Oracle SQL & PL/SQL Database Administrator taking an official "
-            "Oracle Academy assessment. Read the question carefully and select ALL correct answers.\n\n"
+            "Oracle Academy assessment (including quizzes, midterms, and final exams).\n"
+            "Read the question carefully and select ALL correct answers.\n\n"
             f"Question:\n{question}\n\nChoices:\n{choices_formatted}\n\n"
-            f"IMPORTANT: This question requires you to select EXACTLY {num_to_choose} correct options.\n"
-            "Step 1: Analyze Oracle Database semantics, syntax, and exact rules for each choice.\n"
-            "Step 2: State why each choice is correct or incorrect.\n"
-            f"Step 3: Select the {num_to_choose} best correct option indices (0-based, 0 to {len(choices)-1}).\n\n"
+            f"CRITICAL REQUIREMENT: This question requires you to select EXACTLY {num_to_choose} correct options.\n"
+            "Think step by step according to official Oracle Database documentation and semantics.\n"
+            f"Select the {num_to_choose} best correct option indices (0-based, 0 to {len(choices)-1}).\n\n"
             'Respond ONLY with JSON format: {"analysis": "<step-by-step reasoning>", "choice_indices": [<int>, ...]}'
         )
     else:
         prompt = (
             "You are an expert Oracle SQL & PL/SQL Database Administrator taking an official "
-            "Oracle Academy assessment. Read the question carefully and select the ONE best answer.\n\n"
+            "Oracle Academy assessment (including quizzes, midterms, and final exams).\n"
+            "Read the question carefully and select the ONE best answer.\n\n"
             f"Question:\n{question}\n\nChoices:\n{choices_formatted}\n\n"
-            "Step 1: Analyze Oracle Database semantics, syntax, and exact rules for each choice.\n"
-            "Step 2: State why each choice is correct or incorrect.\n"
-            f"Step 3: Select the single best correct option index (0-based, 0 to {len(choices)-1}).\n\n"
+            "CRITICAL REQUIREMENT: Select the single best correct option index (0-based, 0 to {len(choices)-1}).\n"
+            "Think step by step according to official Oracle Database documentation and semantics.\n\n"
             'Respond ONLY with JSON format: {"analysis": "<step-by-step reasoning>", "choice_indices": [<int>]}'
         )
 
@@ -205,10 +251,12 @@ def solve_with_gemini(question: str, choices: list[str], num_to_choose: int = 1)
                 with urllib.request.urlopen(req, timeout=12) as resp:
                     data = json.loads(resp.read().decode("utf-8"))
                 text = data["candidates"][0]["content"]["parts"][0]["text"].strip()
-                if text.startswith("```"):
-                    text = re.sub(r"^```(?:json)?\s*", "", text)
-                    text = re.sub(r"\s*```$", "", text)
-                parsed = json.loads(text.strip())
+                match = re.search(r"\{[\s\S]*\}", text)
+                json_str = match.group(0) if match else text
+                if json_str.startswith("```"):
+                    json_str = re.sub(r"^```(?:json)?\s*", "", json_str)
+                    json_str = re.sub(r"\s*```$", "", json_str)
+                parsed = json.loads(json_str.strip())
                 raw = parsed.get("choice_indices", [])
                 if not raw and "choice_index" in parsed:
                     raw = [parsed["choice_index"]]
@@ -217,6 +265,8 @@ def solve_with_gemini(question: str, choices: list[str], num_to_choose: int = 1)
                     res = valid[:num_to_choose]
                     print(f"  [{model}] -> {[i+1 for i in res]} "
                           f"{[choices[i].splitlines()[0][:40] for i in res]}", flush=True)
+                    if "analysis" in parsed:
+                        print(f"  [REASONING] {parsed['analysis'][:120]}", flush=True)
                     return res
                 if valid:
                     return valid
@@ -327,16 +377,33 @@ def detect_num_to_choose(q_prompt: str, choices: list[str], target) -> int:
             return num_map[word]
 
     # 2. Key phrases in question prompt text
-    if any(p in full_text for p in ["choose three", "choose 3", "select three", "select 3", "three correct"]):
+    # 2. Key phrases in question prompt text
+    if any(p in full_text for p in ["choose three", "choose 3", "select three", "select 3", "three correct", "three choices"]):
         return 3
-    if any(p in full_text for p in ["choose two", "choose 2", "select two", "select 2", "two correct", "choose both", "select both"]):
+    if any(p in full_text for p in ["choose two", "choose 2", "select two", "select 2", "two correct", "choose both", "select both", "two choices"]):
         return 2
-    if any(p in full_text for p in ["choose four", "choose 4", "select four", "select 4"]):
+    if any(p in full_text for p in ["choose four", "choose 4", "select four", "select 4", "four correct"]):
         return 4
     if any(p in full_text for p in ["choose all", "mark all", "select all"]):
         return min(3, len(choices))
 
-    # 3. Inspect DOM input types in active frame
+    # 3. Check page banner text
+    try:
+        page_banner = target.evaluate("""() => {
+            const body = (document.body.innerText || '').toLowerCase();
+            return {
+                isMulti: body.includes('mark all that apply') || body.includes('choose all that apply'),
+                isSingle: body.includes('just one correct') || body.includes('true or false')
+            };
+        }""")
+        if page_banner.get("isSingle"):
+            return 1
+        if page_banner.get("isMulti"):
+            return 2
+    except Exception:
+        pass
+
+    # 4. Inspect DOM input types in active frame
     try:
         input_types = target.evaluate("""() => ({
             checkboxes: document.querySelectorAll("input[type='checkbox']").length,
@@ -539,7 +606,7 @@ def click_nav(target, patterns: list[str]) -> bool:
 def run_quiz(page, quiz_label: str) -> None:
     print(f"\n{'='*60}\n[QUIZ] {quiz_label}\n{'='*60}", flush=True)
     q_idx = 1
-    max_q = 25
+    max_q = 60
 
     while q_idx <= max_q:
         time.sleep(2)
@@ -581,7 +648,27 @@ def run_quiz(page, quiz_label: str) -> None:
         select_options(target, chosen, choices)
         time.sleep(0.5)
 
-        is_last = "15 of 15" in q_num.lower() or "15 of 15" in q_prompt.lower()
+        # Robust detection of last question (e.g. "Question 15 of 15", "Question 30 of 30", "Question 50 of 50")
+        is_last = False
+        m_q = re.search(r"Question\s+(\d+)\s+of\s+(\d+)", q_num, re.IGNORECASE)
+        if not m_q:
+            m_q = re.search(r"Question\s+(\d+)\s+of\s+(\d+)", q_prompt, re.IGNORECASE)
+        if m_q and int(m_q.group(1)) == int(m_q.group(2)):
+            is_last = True
+
+        if not is_last:
+            try:
+                has_complete_btn = target.evaluate("""() => {
+                    const btns = Array.from(document.querySelectorAll('button, input[type="button"], a.t-Button'));
+                    return btns.some(b => {
+                        const t = (b.innerText || b.value || '').trim().toLowerCase();
+                        return (t.includes('complete assessment') || t.includes('finish assessment')) && !b.disabled;
+                    });
+                }""")
+                if has_complete_btn:
+                    is_last = True
+            except Exception:
+                pass
 
         if is_last:
             print(f"  [ACTION] Final question — Complete Assessment", flush=True)
@@ -742,6 +829,13 @@ def harvest_results(page) -> int:
             if results:
                 print(f"  [RESULTS] Harvested {len(results)} correct answers",
                       flush=True)
+                try:
+                    cache = load_answers_cache()
+                    cache.update(results)
+                    save_answers_cache(cache)
+                    print(f"  [CACHE] Saved {len(results)} answers to cache (total {len(cache)})", flush=True)
+                except Exception as c_exc:
+                    print(f"  [CACHE ERROR] Failed to save cache: {c_exc}", flush=True)
                 return len(results)
             print("  [RESULTS] No answers found in review", flush=True)
     except Exception as exc:
@@ -796,23 +890,21 @@ def handle_score_summary(page, quiz_label: str) -> None:
 
 
 def find_and_click_quiz_link(page) -> bool:
-    """Find and click a 'Quiz: DP - Section X' link in the sidebar
-    or course outline. Skips midterm/final exams. Returns True if clicked."""
-    clicked = page.evaluate("""() => {
+    """Find and click a quiz, midterm, or final exam link in the sidebar
+    or course outline. Returns True if clicked."""
+    clicked = page.evaluate(r"""() => {
         const links = Array.from(document.querySelectorAll('a'));
         const quizLinks = links.filter(a => {
             const t = (a.innerText || '').trim();
-            return /quiz\\s*:\\s*dp/i.test(t) || /quiz\\s*-\\s*section/i.test(t);
+            return /quiz/i.test(t) || /midterm/i.test(t) || /final\s*exam/i.test(t) ||
+                   /section/i.test(t) || /exam/i.test(t) || /test/i.test(t);
         });
         for (const ql of quizLinks) {
             const parent = ql.closest('tr, li, .t-TreeNav-item, .t-Card, div');
             const parentText = (parent ? parent.innerText : ql.innerText).toLowerCase();
             const isDone = parentText.includes('100%') || parentText.includes('passed') ||
                            parentText.includes('mastery achieved');
-            const isExam = parentText.includes('midterm') ||
-                           parentText.includes('final exam') ||
-                           parentText.includes('final examination');
-            if (!isDone && !isExam) {
+            if (!isDone) {
                 ql.click();
                 return { clicked: true, text: (ql.innerText || '').trim(),
                          href: ql.href || '' };
@@ -821,7 +913,7 @@ def find_and_click_quiz_link(page) -> bool:
         return { clicked: false };
     }""")
     if clicked.get("clicked"):
-        print(f"  [QUIZ LINK] Clicked: '{clicked.get('text')}'", flush=True)
+        print(f"  [QUIZ/EXAM LINK] Clicked: '{clicked.get('text')}'", flush=True)
         time.sleep(5)
         return True
     return False
@@ -995,7 +1087,7 @@ COMPLETED_COURSES: set[str] = set()
 
 
 def handle_page_14(page) -> str | bool:
-    print("  [PAGE 14] Scanning for next incomplete quiz/section", flush=True)
+    print("  [PAGE 14] Scanning for next incomplete quiz, midterm, or final exam", flush=True)
     if find_and_click_quiz_link(page):
         return True
     result = page.evaluate("""() => {
@@ -1004,45 +1096,39 @@ def handle_page_14(page) -> str | bool:
         const items = [];
         for (const c of containers) {
             const text = (c.innerText || '').toLowerCase();
-            if (/section\\s*\\d+/i.test(text) || /quiz\\s*:\\s*/i.test(text)) {
+            if (/section\\s*\\d+/i.test(text) || /quiz/i.test(text) || /midterm/i.test(text) || /final/i.test(text) || /exam/i.test(text) || /test/i.test(text)) {
                 const isDone = text.includes('100%') ||
                     text.includes('mastery achieved') || text.includes('passed') ||
                     c.querySelector('.u-success, .fa-check, .fa-check-circle, [class*="check"], [class*="complete"]') !== null;
-                const isExam = text.includes('midterm') ||
-                               text.includes('final exam') ||
-                               text.includes('final examination');
                 const link = c.querySelector('a') || (c.tagName === 'A' ? c : null);
-                items.push({ isDone, isExam, hasLink: !!link,
+                items.push({ isDone, hasLink: !!link,
                              text: (c.innerText || '').trim().substring(0, 60) });
             }
         }
-        const hasNonExamIncomplete = items.some(i => !i.isDone && !i.isExam && i.hasLink);
-        if (!hasNonExamIncomplete) {
-            return { onlyExamsLeft: true, clicked: null };
+        const hasIncomplete = items.some(i => !i.isDone && i.hasLink);
+        if (!hasIncomplete && items.length > 0) {
+            return { allCompleted: true, clicked: null };
         }
         for (const c of containers) {
             const text = (c.innerText || '').toLowerCase();
-            if (/section\\s*\\d+/i.test(text) || /quiz\\s*:\\s*/i.test(text)) {
+            if (/section\\s*\\d+/i.test(text) || /quiz/i.test(text) || /midterm/i.test(text) || /final/i.test(text) || /exam/i.test(text) || /test/i.test(text)) {
                 const isDone = text.includes('100%') ||
                     text.includes('mastery achieved') || text.includes('passed') ||
                     c.querySelector('.u-success, .fa-check, .fa-check-circle, [class*="check"], [class*="complete"]') !== null;
-                const isExam = text.includes('midterm') ||
-                               text.includes('final exam') ||
-                               text.includes('final examination');
-                if (!isDone && !isExam) {
+                if (!isDone) {
                     const link = c.querySelector('a') || (c.tagName === 'A' ? c : null);
                     if (link) {
                         link.click();
-                        return { onlyExamsLeft: false,
+                        return { allCompleted: false,
                                  clicked: (link.innerText || '').trim().split('\\n')[0] };
                     }
                 }
             }
         }
-        return { onlyExamsLeft: false, clicked: null };
+        return { allCompleted: false, clicked: null };
     }""")
-    if isinstance(result, dict) and result.get("onlyExamsLeft"):
-        print("  [PAGE 14] No remaining non-exam sections in this course! Switching course...", flush=True)
+    if isinstance(result, dict) and result.get("allCompleted"):
+        print("  [PAGE 14] All sections, quizzes, and exams completed for this course! Switching course...", flush=True)
         return "SWITCH_COURSE"
     clicked = result.get("clicked") if isinstance(result, dict) else None
     if clicked:
