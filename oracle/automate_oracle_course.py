@@ -589,25 +589,105 @@ def run_page_190_quiz_solver(page: Page, quiz_title: str):
                 time.sleep(1)
 
         else:
-            # Questions 1 through 14: STRICTLY Submit Answer / Next Question
+            # Questions 1 through N-1: Submit Answer / Next Question
             print(f"[ACTION] Advancing ({q_num}). Submitting with 'Submit Answer'...")
-            sub_btn = target.locator("button, a.t-Button, input[type='button']").filter(
-                has_text=re.compile(r"^\s*(Submit Answer|Submit|Next Question)\s*$", re.I)
-            ).first
-            if sub_btn.count() > 0 and sub_btn.is_visible():
-                sub_btn.click(force=True)
-            else:
-                target.evaluate("""() => {
-                    const btns = Array.from(document.querySelectorAll("button, input[type='button'], a.t-Button"));
-                    const b = btns.find(x => {
-                        const t = (x.innerText || x.value || '').toLowerCase().trim();
-                        return (t === 'submit answer' || t === 'submit' || t === 'next question') && !x.disabled;
-                    });
-                    if (b) b.click();
-                }""")
+            submitted = False
 
-        time.sleep(3)
-        question_idx += 1
+            contexts = [page, target] + [f for f in page.frames if f not in (page, target)]
+            for ctx in contexts:
+                for lbl in ["Submit Answer", "Next Question", "Submit"]:
+                    for sel in [
+                        f"button:has-text('{lbl}')",
+                        f"a:has-text('{lbl}')",
+                        f".t-Button:has-text('{lbl}')",
+                        f"[role='button']:has-text('{lbl}')",
+                        f"input[value*='{lbl}']",
+                    ]:
+                        try:
+                            loc = ctx.locator(sel).first
+                            if loc.count() > 0 and loc.is_visible():
+                                box = loc.bounding_box()
+                                if box:
+                                    page.mouse.click(box["x"] + box["width"] / 2, box["y"] + box["height"] / 2)
+                                    time.sleep(0.3)
+                                loc.click(force=True, timeout=2000)
+                                submitted = True
+                                break
+                        except Exception:
+                            pass
+                    if submitted:
+                        break
+                if submitted:
+                    break
+
+            if not submitted:
+                for ctx in contexts:
+                    try:
+                        ctx.evaluate("""() => {
+                            const btns = Array.from(document.querySelectorAll("button, input[type='button'], a.t-Button, [role='button']"));
+                            const b = btns.find(x => {
+                                const t = (x.innerText || x.value || '').toLowerCase().trim();
+                                return (t.includes('submit answer') || t === 'submit' || t.includes('next question')) && !x.disabled;
+                            });
+                            if (b) {
+                                b.focus();
+                                b.click();
+                                ['pointerdown', 'mousedown', 'pointerup', 'mouseup', 'click'].forEach(evt => {
+                                    b.dispatchEvent(new MouseEvent(evt, { bubbles: true, cancelable: true, view: window }));
+                                });
+                            } else if (window.apex && typeof apex.submit === 'function') {
+                                apex.submit('SUBMIT_ANSWER');
+                            }
+                        }""")
+                    except Exception:
+                        pass
+
+            # Wait for next question or page update with active re-triggering
+            advanced = False
+            for wait_sec in range(10):
+                time.sleep(1)
+                try:
+                    if "63000:192" in page.url:
+                        advanced = True
+                        break
+                    
+                    q_after = None
+                    for ctx in [target, page]:
+                        try:
+                            q_after = ctx.evaluate("""() => {
+                                const all = Array.from(document.querySelectorAll('*'));
+                                const match = all.find(el => el.children.length === 0 &&
+                                    /Question\\s+\\d+\\s+of\\s+\\d+/i.test((el.innerText || '').trim()));
+                                return match ? match.innerText.trim() : null;
+                            }""")
+                            if q_after:
+                                break
+                        except Exception:
+                            pass
+
+                    if q_after and q_after != q_num:
+                        print(f"[ADVANCED] Moved from {q_num} -> {q_after}")
+                        advanced = True
+                        break
+
+                    if wait_sec in (2, 4, 6):
+                        print(f"[RETRY SUBMIT] Re-triggering Submit Answer (sec={wait_sec})...")
+                        for ctx in contexts:
+                            try:
+                                ctx.evaluate("""() => {
+                                    const b = Array.from(document.querySelectorAll("button, a.t-Button")).find(x =>
+                                        (x.innerText || '').toLowerCase().includes('submit answer'));
+                                    if (b) b.click();
+                                    else if (window.apex) apex.submit('SUBMIT_ANSWER');
+                                }""")
+                            except Exception:
+                                pass
+                except Exception:
+                    time.sleep(2)
+                    advanced = True
+                    break
+
+            question_idx += 1
 
 
 def scrape_and_cache_results(target) -> int:

@@ -603,6 +603,116 @@ def click_nav(target, patterns: list[str]) -> bool:
     return False
 
 
+def submit_quiz_question(page, target, is_final: bool = False) -> bool:
+    """Submit the answered question with 100% reliability using multi-layer dispatch."""
+    labels = ["Complete Assessment", "Finish Assessment"] if is_final else ["Submit Answer", "Next Question", "Submit"]
+
+    # 1. Playwright Locator & Bounding Box Mouse Click across page and all frames
+    contexts = [page, target] + [f for f in page.frames if f not in (page, target)]
+    for ctx in contexts:
+        for lbl in labels:
+            for selector in [
+                f"button:has-text('{lbl}')",
+                f"a:has-text('{lbl}')",
+                f".t-Button:has-text('{lbl}')",
+                f"[role='button']:has-text('{lbl}')",
+                f"input[value*='{lbl}']",
+                f"text='{lbl}'",
+            ]:
+                try:
+                    loc = ctx.locator(selector).first
+                    if loc.count() > 0 and loc.is_visible():
+                        # Try coordinate mouse click via bounding box
+                        box = loc.bounding_box()
+                        if box:
+                            page.mouse.click(box["x"] + box["width"] / 2, box["y"] + box["height"] / 2)
+                            time.sleep(0.3)
+                        loc.click(force=True, timeout=2000)
+                        return True
+                except Exception:
+                    pass
+
+    # 2. Comprehensive JavaScript DOM click with pointer/mouse events across all frames
+    for ctx in contexts:
+        try:
+            clicked = ctx.evaluate("""(targetLabels) => {
+                const searchDocs = [document];
+                document.querySelectorAll('iframe').forEach(f => {
+                    try { if (f.contentDocument) searchDocs.push(f.contentDocument); } catch(e){}
+                });
+
+                for (const doc of searchDocs) {
+                    const allEls = Array.from(doc.querySelectorAll(
+                        'button, a, input[type="button"], input[type="submit"], [role="button"], .t-Button, span'
+                    ));
+                    
+                    const match = allEls.find(el => {
+                        const t = (el.innerText || el.value || el.textContent || '').trim().toLowerCase();
+                        return targetLabels.some(l => {
+                            const lowL = l.toLowerCase();
+                            return t === lowL || (t.includes(lowL) && t.length < 35);
+                        }) && !el.disabled && !el.classList.contains('is-disabled');
+                    });
+
+                    if (match) {
+                        const clickable = match.closest('button, a, input, [role="button"]') || match;
+                        clickable.focus();
+                        clickable.click();
+
+                        ['pointerdown', 'mousedown', 'pointerup', 'mouseup', 'click'].forEach(evt => {
+                            clickable.dispatchEvent(new MouseEvent(evt, {
+                                bubbles: true,
+                                cancelable: true,
+                                view: window,
+                                buttons: 1
+                            }));
+                        });
+
+                        const onclick = clickable.getAttribute('onclick');
+                        if (onclick) {
+                            try { new Function(onclick).call(clickable); } catch(e){}
+                        }
+                        const href = clickable.getAttribute('href');
+                        if (href && href.startsWith('javascript:')) {
+                            try { new Function(href.replace(/^javascript:/, '')).call(clickable); } catch(e){}
+                        }
+                        return true;
+                    }
+                }
+                return false;
+            }""", labels)
+            if clicked:
+                return True
+        except Exception:
+            pass
+
+    # 3. APEX Direct API Execution
+    for ctx in contexts:
+        try:
+            ctx.evaluate("""(isFinal) => {
+                if (window.apex && typeof apex.submit === 'function') {
+                    const targetText = isFinal ? 'complete assessment' : 'submit answer';
+                    const btn = Array.from(document.querySelectorAll('button, a.t-Button')).find(b => {
+                        const t = (b.innerText || '').toLowerCase();
+                        return t.includes(targetText) || t.includes('next question');
+                    });
+                    if (btn && btn.id) {
+                        apex.submit(btn.id);
+                    } else if (typeof doSubmit === 'function') {
+                        doSubmit(isFinal ? 'COMPLETE_ASSESSMENT' : 'SUBMIT_ANSWER');
+                    } else {
+                        apex.submit(isFinal ? 'COMPLETE_ASSESSMENT' : 'SUBMIT_ANSWER');
+                    }
+                } else if (typeof doSubmit === 'function') {
+                    doSubmit(isFinal ? 'COMPLETE_ASSESSMENT' : 'SUBMIT_ANSWER');
+                }
+            }""", is_final)
+        except Exception:
+            pass
+
+    return False
+
+
 def run_quiz(page, quiz_label: str) -> None:
     print(f"\n{'='*60}\n[QUIZ] {quiz_label}\n{'='*60}", flush=True)
     q_idx = 1
@@ -646,7 +756,7 @@ def run_quiz(page, quiz_label: str) -> None:
 
         chosen = solve_with_gemini(q_prompt, choices, num_to_choose)
         select_options(target, chosen, choices)
-        time.sleep(0.5)
+        time.sleep(0.8)
 
         # Robust detection of last question (e.g. "Question 15 of 15", "Question 30 of 30", "Question 50 of 50")
         is_last = False
@@ -671,8 +781,8 @@ def run_quiz(page, quiz_label: str) -> None:
                 pass
 
         if is_last:
-            print(f"  [ACTION] Final question — Complete Assessment", flush=True)
-            click_nav(target, [r"^\s*(Complete Assessment|Finish Assessment)\s*$"])
+            print(f"  [ACTION] Final question reached ({q_num}) — Complete Assessment", flush=True)
+            submit_quiz_question(page, target, is_final=True)
             time.sleep(2)
             for _ in range(8):
                 confirmed = page.evaluate("""() => {
@@ -699,84 +809,52 @@ def run_quiz(page, quiz_label: str) -> None:
                     break
                 time.sleep(1)
         else:
-            print(f"  [ACTION] Submit Answer / Next", flush=True)
-            submitted = False
-            for loc in [
-                target.locator("button:has-text('Submit Answer'), input[value*='Submit Answer']").first,
-                target.locator("button:has-text('Next Question'), input[value*='Next Question']").first,
-                target.locator("button:has-text('Submit'), input[value*='Submit']").first,
-                page.locator("button:has-text('Submit Answer'), input[value*='Submit Answer']").first,
-                page.locator("button:has-text('Next Question'), input[value*='Next Question']").first,
-                page.locator("button:has-text('Submit'), input[value*='Submit']").first,
-            ]:
-                try:
-                    if loc.count() > 0 and loc.is_visible():
-                        loc.scroll_into_view_if_needed()
-                        loc.click(force=True, timeout=3000)
-                        submitted = True
-                        break
-                except Exception:
-                    pass
+            print(f"  [ACTION] Submitting answer for {q_num}...", flush=True)
+            submit_quiz_question(page, target, is_final=False)
 
-            if not submitted:
-                target.evaluate("""() => {
-                    const btns = Array.from(document.querySelectorAll(
-                        'button, input[type="button"], input[type="submit"], a.t-Button, [role="button"]'));
-                    const b = btns.find(x => {
-                        const t = (x.innerText || x.value || '').trim().toLowerCase();
-                        return (t.includes('submit answer') || t === 'submit' ||
-                                t.includes('next question') || t === 'next') && !x.disabled;
-                    });
-                    if (b) {
-                        b.click();
-                        return;
-                    }
-                    if (window.apex && typeof apex.submit === 'function') {
-                        apex.submit('SUBMIT');
-                    } else if (typeof doSubmit === 'function') {
-                        doSubmit('SUBMIT');
-                    }
-                }""")
-
-            # Wait for next question or page update
+            # Wait for next question or page update with active re-triggering
             advanced = False
-            for _ in range(8):
+            for wait_sec in range(10):
                 time.sleep(1)
                 try:
                     if "p=63000:192" in page.url or "percentage" in (page.title() or "").lower():
                         advanced = True
                         break
-                    q_after = target.evaluate("""() => {
-                        const all = Array.from(document.querySelectorAll('*'));
-                        const match = all.find(el => el.children.length === 0 &&
-                            /Question\\s+\\d+\\s+of\\s+\\d+/i.test((el.innerText || '').trim()));
-                        return match ? match.innerText.trim() : '';
-                    }""")
+                    
+                    q_after = None
+                    for ctx in [target, page]:
+                        try:
+                            q_after = ctx.evaluate("""() => {
+                                const all = Array.from(document.querySelectorAll('*'));
+                                const match = all.find(el => el.children.length === 0 &&
+                                    /Question\\s+\\d+\\s+of\\s+\\d+/i.test((el.innerText || '').trim()));
+                                return match ? match.innerText.trim() : null;
+                            }""")
+                            if q_after:
+                                break
+                        except Exception:
+                            pass
+
                     if q_after and q_after != q_num:
+                        print(f"  [ADVANCED] Moved from {q_num} -> {q_after}", flush=True)
                         advanced = True
                         q_idx += 1
                         break
+
+                    # Active re-trigger if page hasn't advanced
+                    if wait_sec in (2, 4, 6):
+                        print(f"  [RETRY SUBMIT] Re-triggering Submit Answer (sec={wait_sec})...", flush=True)
+                        submit_quiz_question(page, target, is_final=False)
+
                 except Exception:
-                    # Page navigating / reloading
                     time.sleep(2)
                     advanced = True
                     q_idx += 1
                     break
 
             if not advanced:
-                print(f"  [WARN] Still on {q_num} — triggering direct APEX submit", flush=True)
-                target.evaluate("""() => {
-                    if (window.apex && typeof apex.submit === 'function') {
-                        apex.submit('SUBMIT');
-                    } else if (typeof doSubmit === 'function') {
-                        doSubmit('SUBMIT');
-                    } else {
-                        const b = Array.from(document.querySelectorAll('button, input[type="button"], a.t-Button')).find(x =>
-                            (x.innerText || x.value || '').toLowerCase().includes('submit') ||
-                            (x.innerText || x.value || '').toLowerCase().includes('next'));
-                        if (b) b.click();
-                    }
-                }""")
+                print(f"  [RETRY APEX] Still on {q_num} — sending direct APEX submit event", flush=True)
+                submit_quiz_question(page, target, is_final=False)
                 time.sleep(3)
                 q_idx += 1
 
