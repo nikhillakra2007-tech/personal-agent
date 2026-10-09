@@ -118,7 +118,9 @@ oracle/
 │   ├── harvest_view_results.py    # Result harvest verification
 │   └── inspect_frames.py          # Iframe hierarchy detector
 └── chains/
-    └── oracle-academy.json        # Lakra dual-plane policy chain specification
+    ├── oracle-academy.json        # SSO & navigation validation chain
+    ├── oracle-courses.json        # Course portal & section discovery chain
+    └── oracle-quiz.json           # Direct assessment landing & verification chain
 ```
 
 ---

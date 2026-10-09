@@ -11,6 +11,7 @@
 [![License](https://img.shields.io/badge/License-MIT-blue?style=for-the-badge)](LICENSE)
 
 [Architecture](#-system-architecture) •
+[Agent vs. Script](#-agent-vs-script-architectural-justification) •
 [Execution Roads](#-execution-roads) •
 [Oracle Academy Suite](#-oracle-academy-automation-suite) •
 [Safety & Policy](#%EF%B8%8F-policy--safety-model) •
@@ -72,6 +73,52 @@ flowchart TD
 | **Control Plane** | Task registry, goal shaping, planning, policy evaluation, concurrency locks, approval settlements, audit ledger | `src/lakra/control/` |
 | **Execution Plane** | Headless/headed browser controller, DOM observers, actions, mutation verification, filesystem/terminal wrappers | `src/lakra/execution/` |
 | **Governance** | Real-time RAM/CPU/GPU sampling, token ledgers, failure backoff | `src/lakra/resources/` |
+
+---
+
+## 🤖 Agent vs. Script: Architectural Justification
+
+A common engineering question is: ***"Is this automation an agent, a script, or what?"***
+
+Lakra 2.0 (and its Oracle Academy Automation Suite) is fundamentally an **Autonomous Agent System with Closed-Loop Epistemic Reasoning**, not a script or macro. The distinction is rooted in control theory, software architecture, and decision autonomy:
+
+### 1. Closed-Loop Feedback (OODA Loop) vs. Open-Loop Scripting
+* **A Script is Open-Loop**: Traditional scripts follow fixed, hardcoded sequences:
+  $$\text{Action}_1 \longrightarrow \text{sleep}(2) \longrightarrow \text{Action}_2 \longrightarrow \text{submit}()$$
+  If an unexpected dialog appears, if an iframe re-renders, or if page latency fluctuates, the script blindly fails. It equates *"event fired"* with *"success achieved"*.
+* **Lakra is a Closed-Loop Agent**: Lakra operates on continuous perception-action-verification cycles:
+  $$\text{Observe} \longrightarrow \text{Orient / Reason} \longrightarrow \text{Decide} \longrightarrow \text{Act} \longrightarrow \text{Verify Ground Truth}$$
+  No mutation is accepted without independent post-action DOM verification. If state transitions deviate, Lakra enters recovery or re-plans instead of crashing.
+
+### 2. Dual-Plane Separation of Concerns
+* **Scripts Conflate Reasoning & Execution**: Scripts directly intertwine DOM interaction, logic, and side-effects in one unconstrained execution thread.
+* **Lakra Enforces Strict Plane Isolation**:
+  * **Control Plane** solely reasons, shapes goals, manages state machines, and enforces safety policies (L0–L4). It has zero access to browser actuators.
+  * **Execution Plane** solely executes capabilities under signed capability tokens and verifies state post-conditions. It is completely incapable of approving its own actions.
+
+### 3. Epistemic Memory & Autonomous Self-Healing
+* When completing assessments, if the score is under 100%, Lakra does not terminate or require human intervention.
+* It autonomously:
+  1. Navigates to **"View Results"**
+  2. Extracts Oracle's verified ground-truth questions and answers
+  3. Caches them into persistent memory (`var/oracle_answers_cache.json`)
+  4. Launches an automated retake loop, achieving **guaranteed 100% scores**.
+* Scripts have no world model or persistent epistemic memory; agents learn and adapt across runs.
+
+### 4. Non-Deterministic Reasoning with Multi-Modal LLMs
+* Lakra leverages **Gemini 3.8 Flash** (`oracle/solvers/`) to parse unstructured database and programming queries on the fly, accurately discriminating between single-choice, multiple-choice ("Choose two", "Choose three"), and "Mark all that apply" constraints.
+* It combines **symbolic deterministic guards** (boundary verification, anti-premature submit gates) with **neural reasoning** (LLM context solving).
+
+### Summary Comparison
+
+| Architectural Dimension | Traditional Automation Script | Lakra 2.0 Autonomous Agent |
+|---|---|---|
+| **Control Paradigm** | Imperative, linear, open-loop | Reactive, goal-driven, closed-loop (OODA) |
+| **Perception** | Rigid CSS/XPath selectors | Frame-aware DOM inspection & multi-modal reasoning |
+| **Safety & Governance** | None; runs with full process authority | Strict L0–L4 policy engine + out-of-band human approvals |
+| **Failure Handling** | Exception crash or blind timeouts | Automatic retry, re-grounding, and fallback recovery |
+| **Memory & Learning** | Stateless across executions | Persistent answer memory & self-healing retake loops |
+| **Decision Making** | Hardcoded branching | Hybrid: Deterministic policy engine + Gemini LLM reasoning |
 
 ---
 
@@ -247,6 +294,11 @@ personal-agent/
 │   ├── tools/                  # Auxiliary CLI utilities (2 files)
 │   └── replays/                # Historical development slice verification harnesses
 │
+├── chains/                     # Multi-leg deterministic navigation chains
+│   ├── oracle-academy.json     # SSO & landing verification chain
+│   ├── oracle-courses.json     # Course syllabus traversal chain
+│   └── oracle-quiz.json        # Assessment landing verification chain
+│
 ├── oracle/                     # Oracle Academy APEX Automation Suite
 │   ├── README.md               # Dedicated documentation & architecture overview
 │   ├── automate_oracle_course.py # Master autonomous course & quiz engine (v16)
@@ -254,7 +306,7 @@ personal-agent/
 │   ├── manual_signin.py        # SSO session bootstrap for persistent context
 │   ├── solvers/                # Gemini 3.8 Flash & multi-choice solver modules
 │   ├── diagnostics/            # Frame & DOM inspection utilities
-│   └── chains/                 # Lakra deterministic chain specs (oracle-academy.json)
+│   └── chains/                 # Mirror of autonomous chain specifications
 │
 ├── specs/                      # Formal Feature Specifications
 │   └── 001-lakra-v1/           # V1 formal spec, plan, tasks, and click road briefs
